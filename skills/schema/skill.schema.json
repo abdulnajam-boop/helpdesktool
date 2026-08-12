@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://helpdesktool.dev/schemas/skill.schema.json",
+  "title": "Helpdesktool Skill Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "name", "category", "description", "risk", "supported_os", "permissions", "inputs", "prechecks", "execute", "verify", "audit"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "name": {"type": "string", "minLength": 3},
+    "category": {"enum": ["diagnostics", "networking", "services", "storage", "applications", "security", "remediation", "ticketing", "communication", "audit"]},
+    "description": {"type": "string", "minLength": 10},
+    "risk": {"enum": ["read_only", "low", "medium", "high", "critical"]},
+    "supported_os": {"type": "array", "uniqueItems": true, "minItems": 1, "items": {"enum": ["windows", "linux", "macos"]}},
+    "permissions": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "inputs": {"type": "object", "additionalProperties": {"type": "object"}},
+    "prechecks": {"type": "array", "items": {"type": "string"}},
+    "execute": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "object", "required": ["executor"], "properties": {"executor": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}}, "additionalProperties": true}},
+    "verify": {"type": "array", "items": {"type": "string"}},
+    "rollback": {"type": ["object", "null"]},
+    "approval": {"type": "object", "properties": {"required": {"type": "boolean"}, "roles": {"type": "array", "items": {"type": "string"}}}, "required": ["required"], "additionalProperties": false},
+    "audit": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "tags": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+  }
+}
