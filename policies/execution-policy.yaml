@@ -1,0 +1,51 @@
+version: 1
+mode: default_deny
+
+principles:
+  - least_privilege
+  - deterministic_execution
+  - validate_all_inputs
+  - verify_all_mutations
+  - audit_every_action
+  - never_expose_secrets
+
+risk_policy:
+  read_only:
+    automatic: true
+    approval_required: false
+  low:
+    automatic: true
+    approval_required: false
+    require_verification: true
+  medium:
+    automatic: false
+    approval_required: true
+    require_verification: true
+    require_rollback_plan: true
+  high:
+    automatic: false
+    approval_required: true
+    require_verification: true
+    require_rollback_plan: true
+    require_admin: true
+  critical:
+    automatic: false
+    approval_required: true
+    require_admin: true
+    require_secondary_confirmation: true
+
+forbidden:
+  - llm_arbitrary_privileged_shell
+  - disable_endpoint_security_without_explicit_policy
+  - delete_user_data_without_explicit_approval
+  - expose_credentials_in_logs
+  - persist_plaintext_secrets
+  - bypass_approval_gate
+  - self_modify_execution_policy
+  - self_modify_skill_code_in_production
+
+execution_limits:
+  default_timeout_seconds: 60
+  maximum_timeout_seconds: 600
+  maximum_output_bytes: 1048576
+  concurrent_mutating_actions_per_device: 1
