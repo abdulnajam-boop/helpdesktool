@@ -1,0 +1,46 @@
+id: diagnostics.system_health
+version: 1.0.0
+name: System Health Snapshot
+category: diagnostics
+description: Collect a read-only health snapshot covering CPU, memory, disk, uptime, and operating-system information.
+risk: read_only
+supported_os:
+  - windows
+  - linux
+  - macos
+permissions:
+  - system.read
+inputs: {}
+prechecks:
+  - agent_is_healthy
+  - supported_operating_system
+execute:
+  windows:
+    executor: executors/windows/system_health.ps1
+    timeout_seconds: 30
+  linux:
+    executor: executors/linux/system_health.sh
+    timeout_seconds: 30
+  macos:
+    executor: executors/macos/system_health.sh
+    timeout_seconds: 30
+verify:
+  - output_is_valid_json
+  - required_health_fields_present
+rollback: null
+approval:
+  required: false
+audit:
+  - skill_id
+  - skill_version
+  - device_id
+  - started_at
+  - completed_at
+  - exit_code
+  - result_digest
+tags:
+  - health
+  - inventory
+  - cpu
+  - memory
+  - disk
