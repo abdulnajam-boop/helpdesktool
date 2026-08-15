@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helpdesktool"
+version = "0.1.0"
+description = "Safety-first orchestration core for an autonomous IT help desk"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+[project.urls]
+Homepage = "https://github.com/abdulnajam-boop/helpdesktool"
+Repository = "https://github.com/abdulnajam-boop/helpdesktool.git"
+Issues = "https://github.com/abdulnajam-boop/helpdesktool/issues"
+
+[tool.setuptools.packages.find]
+include = ["helpdesktool*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

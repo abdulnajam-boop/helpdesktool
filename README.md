@@ -2,6 +2,8 @@
 
 Autonomous, safety-first AI IT help desk platform.
 
+Canonical repository: [abdulnajam-boop/helpdesktool](https://github.com/abdulnajam-boop/helpdesktool)
+
 ## Mission
 
 Helpdesktool is designed to monitor endpoints, diagnose common IT problems, select controlled remediation skills, verify outcomes, roll back failed changes, and maintain a complete audit trail with minimal human intervention.
@@ -46,4 +48,19 @@ The LLM is a planner and skill selector. Privileged actions are performed only b
 
 ## Status
 
-Foundation work has started. The first milestone is the Skill Library v1 and its safety policy.
+The safety orchestration foundation now includes typed skill/action contracts, a
+default-deny policy engine, independent approvals, verification/rollback transitions,
+tenant-scoped action access, and a hash-chained audit reference adapter.
+
+See the [repository audit](docs/REPOSITORY_AUDIT.md), [production architecture](docs/ARCHITECTURE.md),
+and [prioritized implementation plan](docs/IMPLEMENTATION_PLAN.md). Current persistence
+and executors are intentionally interfaces/reference adapters; they are not yet a
+deployable endpoint management product.
+
+## Development
+
+Requires Python 3.11 or newer. The foundation has no runtime third-party dependencies.
+
+```bash
+python -m pytest
+```
