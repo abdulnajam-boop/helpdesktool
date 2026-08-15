@@ -2,6 +2,8 @@
 
 Autonomous, safety-first AI IT help desk platform.
 
+Canonical repository: [abdulnajam-boop/helpdesktool](https://github.com/abdulnajam-boop/helpdesktool)
+
 ## Mission
 
 Helpdesktool is designed to monitor endpoints, diagnose common IT problems, select controlled remediation skills, verify outcomes, roll back failed changes, and maintain a complete audit trail with minimal human intervention.
