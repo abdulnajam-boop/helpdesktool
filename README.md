@@ -48,10 +48,9 @@ The LLM is a planner and skill selector. Privileged actions are performed only b
 
 ## Status
 
-The runnable FastAPI control plane persists tenants, users, devices, telemetry, tickets,
-actions, approvals, results, idempotency records, and hash-chained audit events in
-PostgreSQL. It reuses the default-deny policy and orchestration state machine. Approved
-jobs are queued only; the control plane deliberately cannot execute OS commands.
+The safety orchestration foundation now includes typed skill/action contracts, a
+default-deny policy engine, independent approvals, verification/rollback transitions,
+tenant-scoped action access, and a hash-chained audit reference adapter.
 
 See the [repository audit](docs/REPOSITORY_AUDIT.md), [production architecture](docs/ARCHITECTURE.md),
 and [prioritized implementation plan](docs/IMPLEMENTATION_PLAN.md). Current persistence
@@ -60,37 +59,8 @@ deployable endpoint management product.
 
 ## Development
 
-### Docker Compose (recommended)
+Requires Python 3.11 or newer. The foundation has no runtime third-party dependencies.
 
 ```bash
-cp .env.example .env
-# Replace every placeholder secret in .env, then:
-docker compose up --build
-curl http://localhost:8000/health/ready
-```
-
-Migrations run as a one-shot Compose service before the API starts. Interactive API
-documentation is available at `http://localhost:8000/docs`.
-
-### Bootstrap workflow
-
-1. `POST /v1/tenants` with `X-Bootstrap-Token` creates a tenant and owner.
-2. Use returned IDs as `X-Tenant-ID` and `X-User-ID` to enroll a device.
-3. Store the returned agent token once; only its SHA-256 digest is persisted.
-4. The agent uses `Authorization: Bearer <token>` plus a unique `Idempotency-Key` for
-   heartbeat and inventory requests.
-5. Users create tickets/actions. Medium/high risk actions require a different owner or
-   admin to call the decision endpoint. All allowed actions remain queued for a future
-   signed endpoint-agent job protocol.
-
-### Local development
-
-Requires Python 3.11+ and PostgreSQL. Install `.[dev]`, configure `.env`, run
-`alembic upgrade head`, then `uvicorn helpdesktool.api:app --reload`.
-
-```bash
-pytest
-ruff check .
-ruff format --check .
-mypy
+python -m pytest
 ```

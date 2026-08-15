@@ -21,7 +21,6 @@ class ActionStatus(StrEnum):
     REQUESTED = "requested"
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
-    QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"

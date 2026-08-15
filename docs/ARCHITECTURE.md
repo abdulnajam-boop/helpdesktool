@@ -77,17 +77,3 @@ tests/                  # domain, contract, integration and security tests
 - Audit writes share a transaction/outbox with state changes and are externally archived.
 - Deployments support zero-downtime migrations, backups with restore drills, metrics,
   traces, structured logs, SLOs, health checks, and gradual agent rollout/rollback.
-
-## Implemented control-plane boundary
-
-FastAPI owns synchronous API validation and calls the existing policy/orchestration
-domain. SQLAlchemy adapters persist action state and append hash-chained events within
-the request transaction. Alembic owns the PostgreSQL schema. The API queues allowlisted
-actions but uses a deliberately nonfunctional local executor, preventing the server
-from becoming a remote shell. Compose runs migrations before starting the unprivileged,
-read-only API container.
-
-Current user authentication uses tenant/user headers validated against an active user
-record. This supports tenant isolation and role tests but is not an identity solution;
-OIDC access-token validation must replace it. Agent bearer tokens are random and stored
-only as hashes, but need expiry, rotation, rate limiting, and eventual mTLS identities.

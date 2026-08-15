@@ -40,12 +40,3 @@ in-memory adapters are testable reference implementations, not production storag
   transport security, secret redaction, and durable audit retention remain unbuilt.
 - Executors are interfaces only. No command execution is shipped until sandboxing,
   signed skills, bounded output, timeout, and least-privilege service identities exist.
-
-## Control-plane increment
-
-The repository now includes a runnable FastAPI/PostgreSQL control plane, Alembic
-migration, Docker Compose deployment, persistent action/audit adapters, tenant-scoped
-queries, basic roles, hashed device credentials, request idempotency, telemetry, ticket,
-action, approval, and audit APIs. Header-based user identity and the bootstrap token are
-development foundations, not production authentication. PostgreSQL RLS, OIDC, token
-rotation, audit sequence locking, outbox dispatch, and signed agent jobs remain required.

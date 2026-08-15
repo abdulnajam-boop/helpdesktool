@@ -4,11 +4,9 @@
 
 1. **Safety-domain contracts (implemented in this increment):** fail-closed policy,
    approval separation, verified execution, rollback states, and chained audit adapter.
-2. **Durable control-plane skeleton (in progress):** FastAPI, PostgreSQL schema,
-   migrations, tenant-scoped repositories, basic RBAC, REST API, idempotency, Docker
-   Compose, and persistent audit/action adapters are implemented. Database RLS,
-   transactional outbox, OIDC, and concurrency integration tests remain before this
-   item is production-complete.
+2. **Durable control-plane skeleton:** PostgreSQL schema with tenant RLS, migrations,
+   transactional audit/outbox, OIDC authentication, RBAC, REST API, idempotency, and
+   OpenAPI contracts. Exit: cross-tenant and concurrency integration tests pass.
 3. **Linux agent read-only pilot:** enrollment and certificate rotation, heartbeat,
    signed job polling/stream, system inventory and service/disk/memory diagnostics. Run
    unprivileged with explicit capability elevation. Exit: 100-device soak and upgrade test.
