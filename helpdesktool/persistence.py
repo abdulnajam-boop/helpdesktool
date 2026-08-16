@@ -9,15 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .audit import AuditEvent
-from .db_models import (
-    Action,
-    AuditEventRow,
-    DomainEventRow,
-    ExecutionResultRow,
-    WebhookDelivery,
-    WebhookSubscription,
-)
-from .events import AUDIT_EVENT_MAPPING, DomainEvent, EventType, sanitize_event_data
+from .db_models import Action, AuditEventRow, ExecutionResultRow
 from .models import (
     ActionRecord,
     ActionRequest,
@@ -160,28 +152,6 @@ class SqlAuditLog:
             )
         )
         self.session.flush()
-        mapped_type = AUDIT_EVENT_MAPPING.get(event_type)
-        if mapped_type is not None:
-            self._publish(
-                DomainEvent.create(
-                    tenant_id,
-                    mapped_type,
-                    correlation_id,
-                    {"actor_id": actor_id, **sanitize_event_data(details)},
-                )
-            )
-        if (
-            event_type == "policy.evaluated"
-            and details.get("approval_required") is True
-        ):
-            self._publish(
-                DomainEvent.create(
-                    tenant_id,
-                    EventType.APPROVAL_REQUIRED,
-                    correlation_id,
-                    {"actor_id": actor_id, **sanitize_event_data(details)},
-                )
-            )
         return AuditEvent(
             sequence=sequence,
             occurred_at=occurred_at.isoformat(),
@@ -193,32 +163,3 @@ class SqlAuditLog:
             previous_hash=previous_hash,
             event_hash=event_hash,
         )
-
-    def _publish(self, event: DomainEvent) -> None:
-        self.session.add(
-            DomainEventRow(
-                id=event.id,
-                tenant_id=event.tenant_id,
-                event_type=event.event_type.value,
-                subject_id=event.subject_id,
-                schema_version=event.schema_version,
-                data=dict(event.data),
-                occurred_at=event.occurred_at,
-            )
-        )
-        subscriptions = self.session.scalars(
-            select(WebhookSubscription).where(
-                WebhookSubscription.tenant_id == event.tenant_id,
-                WebhookSubscription.active.is_(True),
-            )
-        ).all()
-        for subscription in subscriptions:
-            if event.event_type.value in subscription.event_types:
-                self.session.add(
-                    WebhookDelivery(
-                        tenant_id=event.tenant_id,
-                        event_id=event.id,
-                        subscription_id=subscription.id,
-                    )
-                )
-        self.session.flush()
