@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,14 +22,11 @@ from .db_models import (
     DeviceInventory,
     Heartbeat,
     IdempotencyRecord,
-    ExecutionResultRow,
     Tenant,
     Ticket,
     User,
-    WebhookSubscription,
 )
 from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
-from .integrations import validate_webhook_url
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
 from .policy import PolicyEngine
@@ -40,11 +36,9 @@ from .schemas import (
     DeviceEnroll,
     HeartbeatCreate,
     InventoryCreate,
-    JobResult,
     TenantCreate,
     TicketCreate,
     TicketUpdate,
-    WebhookSubscriptionCreate,
 )
 
 
@@ -231,7 +225,7 @@ def heartbeat(
     principal: Principal = Depends(require_agent),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    payload = {"device_id": device_id, **body.model_dump()}
+    payload = body.model_dump()
     if cached := idempotency_lookup(
         session, principal.tenant_id, "heartbeat", idempotency_key, payload
     ):
@@ -260,7 +254,7 @@ def inventory(
     principal: Principal = Depends(require_agent),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    payload = {"device_id": device_id, **body.model_dump(mode="json")}
+    payload = body.model_dump(mode="json")
     if cached := idempotency_lookup(
         session, principal.tenant_id, "inventory", idempotency_key, payload
     ):
@@ -314,18 +308,6 @@ def create_action(
         session, principal.tenant_id, "action", idempotency_key, payload
     ):
         return cached
-    if body.skill_id == "service.restart":
-        if set(body.parameters) != {"service"} or not isinstance(
-            body.parameters.get("service"), str
-        ):
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "service.restart requires only a string service parameter",
-            )
-        if body.parameters["service"] not in get_settings().allowed_services:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN, "service is not allowlisted by control plane"
-            )
     device = tenant_row(session, Device, body.device_id, principal.tenant_id)
     if body.ticket_id:
         tenant_row(session, Ticket, body.ticket_id, principal.tenant_id)
@@ -385,203 +367,6 @@ def get_action(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     return action_json(tenant_row(session, Action, action_id, principal.tenant_id))
-
-
-@app.get("/v1/devices/{device_id}/jobs")
-def poll_jobs(
-    device_id: str,
-    principal: Principal = Depends(require_agent),
-    session: Session = Depends(get_session),
-) -> list[dict[str, Any]]:
-    rows = session.scalars(
-        select(Action)
-        .where(
-            Action.tenant_id == principal.tenant_id,
-            Action.device_id == device_id,
-            Action.status == "queued",
-        )
-        .order_by(Action.created_at)
-        .limit(10)
-    ).all()
-    return [{"id": row.id, "skill_id": row.skill_id, "risk": row.risk} for row in rows]
-
-
-@app.post("/v1/devices/{device_id}/jobs/{action_id}/claim")
-def claim_job(
-    device_id: str,
-    action_id: str,
-    idempotency_key: str = Header(alias="Idempotency-Key"),
-    principal: Principal = Depends(require_agent),
-    session: Session = Depends(get_session),
-) -> dict[str, Any]:
-    payload = {"action_id": action_id, "device_id": device_id}
-    cached = idempotency_lookup(
-        session, principal.tenant_id, "job-claim", idempotency_key, payload
-    )
-    if cached is not None:
-        return {
-            **cached,
-            "claim_token": _claim_token(action_id, cached["attempt"], idempotency_key),
-        }
-    current = session.get(Action, action_id)
-    next_attempt = 1 if current is None else current.attempt + 1
-    token = _claim_token(action_id, next_attempt, idempotency_key)
-    now = datetime.now(UTC)
-    changed = session.execute(
-        update(Action)
-        .where(
-            Action.id == action_id,
-            Action.tenant_id == principal.tenant_id,
-            Action.device_id == device_id,
-            Action.status == "queued",
-        )
-        .values(
-            status="claimed",
-            claim_token_hash=hashlib.sha256(token.encode()).hexdigest(),
-            claimed_at=now,
-            lease_expires_at=now + timedelta(seconds=60),
-            attempt=Action.attempt + 1,
-        )
-    ).rowcount
-    if changed != 1:
-        raise HTTPException(status.HTTP_409_CONFLICT, "job is unavailable")
-    row = session.get(Action, action_id)
-    result = {
-        "id": row.id,
-        "skill_id": row.skill_id,
-        "parameters": row.parameters,
-        "device_id": row.device_id,
-        "attempt": row.attempt,
-        "lease_expires_at": row.lease_expires_at.isoformat(),
-        "claim_token": token,
-    }
-    audit(
-        session,
-        principal.tenant_id,
-        action_id,
-        "execution.claimed",
-        device_id,
-        {"attempt": row.attempt, "lease_expires_at": result["lease_expires_at"]},
-    )
-    stored_result = {
-        key: value for key, value in result.items() if key != "claim_token"
-    }
-    remember(
-        session,
-        principal.tenant_id,
-        "job-claim",
-        idempotency_key,
-        payload,
-        stored_result,
-    )
-    session.commit()
-    return result
-
-
-@app.post("/v1/devices/{device_id}/jobs/{action_id}/result")
-def report_job_result(
-    device_id: str,
-    action_id: str,
-    body: JobResult,
-    claim_token: str = Header(alias="X-Claim-Token"),
-    idempotency_key: str = Header(alias="Idempotency-Key"),
-    principal: Principal = Depends(require_agent),
-    session: Session = Depends(get_session),
-) -> dict[str, Any]:
-    payload = {
-        "action_id": action_id,
-        "device_id": device_id,
-        **body.model_dump(mode="json"),
-    }
-    cached = idempotency_lookup(
-        session, principal.tenant_id, "job-result", idempotency_key, payload
-    )
-    if cached is not None:
-        return cached
-    row = tenant_row(session, Action, action_id, principal.tenant_id)
-    supplied = hashlib.sha256(claim_token.encode()).hexdigest()
-    if (
-        row.device_id != device_id
-        or row.status != "claimed"
-        or not row.claim_token_hash
-    ):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "job is not claimable by this device"
-        )
-    if not secrets.compare_digest(row.claim_token_hash, supplied):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid claim token")
-    expires_at = row.lease_expires_at
-    if expires_at and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    if expires_at and expires_at < datetime.now(UTC):
-        raise HTTPException(status.HTTP_409_CONFLICT, "job claim expired")
-    if body.success and body.verified:
-        row.status = "succeeded"
-    elif body.rollback_attempted and body.rollback_succeeded:
-        row.status = "rolled_back"
-    elif body.rollback_attempted and not body.rollback_succeeded:
-        row.status = "rollback_failed"
-    else:
-        row.status = "failed"
-    session.add(
-        ExecutionResultRow(
-            tenant_id=principal.tenant_id,
-            action_id=action_id,
-            success=body.success,
-            verified=body.verified,
-            output=body.output,
-            error=body.error,
-            rollback_attempted=body.rollback_attempted,
-            rollback_succeeded=body.rollback_succeeded,
-        )
-    )
-    result = {"accepted": True, "action_id": action_id, "status": row.status}
-    audit(
-        session,
-        principal.tenant_id,
-        action_id,
-        "execution.reported",
-        device_id,
-        {
-            "status": row.status,
-            "success": body.success,
-            "verified": body.verified,
-            "rollback_attempted": body.rollback_attempted,
-            "rollback_succeeded": body.rollback_succeeded,
-        },
-    )
-    if body.verified:
-        audit(
-            session,
-            principal.tenant_id,
-            action_id,
-            "execution.verified",
-            device_id,
-            {"success": body.success},
-        )
-    if body.rollback_attempted:
-        audit(
-            session,
-            principal.tenant_id,
-            action_id,
-            "rollback.completed",
-            device_id,
-            {"success": body.rollback_succeeded},
-        )
-    if row.status not in {"succeeded", "rolled_back"}:
-        audit(
-            session,
-            principal.tenant_id,
-            action_id,
-            "action.escalation_required",
-            "system",
-            {"status": row.status, "error": body.error},
-        )
-    remember(
-        session, principal.tenant_id, "job-result", idempotency_key, payload, result
-    )
-    session.commit()
-    return result
 
 
 @app.get("/v1/audit")
@@ -665,75 +450,6 @@ def update_ticket(
     return ticket_json(row)
 
 
-@app.post("/v1/integrations/webhooks", status_code=201)
-def create_webhook_subscription(
-    body: WebhookSubscriptionCreate,
-    principal: Principal = Depends(require_roles("owner", "admin")),
-    session: Session = Depends(get_session),
-) -> dict[str, Any]:
-    try:
-        validate_webhook_url(body.url, allow_http=get_settings().webhook_allow_http)
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    row = WebhookSubscription(
-        tenant_id=principal.tenant_id,
-        name=body.name,
-        url=body.url,
-        secret_ref=body.secret_ref,
-        event_types=sorted({item.value for item in body.event_types}),
-        created_by=principal.actor_id,
-    )
-    session.add(row)
-    try:
-        session.flush()
-    except IntegrityError as exc:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "webhook name already exists"
-        ) from exc
-    audit(
-        session,
-        principal.tenant_id,
-        row.id,
-        "integration.webhook.created",
-        principal.actor_id,
-        {"name": row.name, "event_types": row.event_types},
-    )
-    session.commit()
-    return webhook_json(row)
-
-
-@app.get("/v1/integrations/webhooks")
-def list_webhook_subscriptions(
-    principal: Principal = Depends(require_roles("owner", "admin", "auditor")),
-    session: Session = Depends(get_session),
-) -> list[dict[str, Any]]:
-    rows = session.scalars(
-        select(WebhookSubscription)
-        .where(WebhookSubscription.tenant_id == principal.tenant_id)
-        .order_by(WebhookSubscription.created_at)
-    ).all()
-    return [webhook_json(row) for row in rows]
-
-
-@app.delete("/v1/integrations/webhooks/{subscription_id}", status_code=204)
-def disable_webhook_subscription(
-    subscription_id: str,
-    principal: Principal = Depends(require_roles("owner", "admin")),
-    session: Session = Depends(get_session),
-) -> None:
-    row = tenant_row(session, WebhookSubscription, subscription_id, principal.tenant_id)
-    row.active = False
-    audit(
-        session,
-        principal.tenant_id,
-        row.id,
-        "integration.webhook.disabled",
-        principal.actor_id,
-        {"name": row.name},
-    )
-    session.commit()
-
-
 def tenant_row(session: Session, model: Any, row_id: str, tenant_id: str) -> Any:
     row = session.scalar(
         select(model).where(model.id == row_id, model.tenant_id == tenant_id)
@@ -741,13 +457,6 @@ def tenant_row(session: Session, model: Any, row_id: str, tenant_id: str) -> Any
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "resource not found")
     return row
-
-
-def _claim_token(action_id: str, attempt: int, idempotency_key: str) -> str:
-    message = f"{action_id}:{attempt}:{idempotency_key}".encode()
-    return hmac.new(
-        get_settings().job_claim_secret.encode(), message, hashlib.sha256
-    ).hexdigest()
 
 
 def device_json(row: Device) -> dict[str, Any]:
@@ -787,15 +496,4 @@ def ticket_json(row: Ticket) -> dict[str, Any]:
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
-
-
-def webhook_json(row: WebhookSubscription) -> dict[str, Any]:
-    return {
-        "id": row.id,
-        "name": row.name,
-        "url": row.url,
-        "event_types": row.event_types,
-        "active": row.active,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
     }

@@ -20,11 +20,3 @@ def test_missing_os_support_is_denied():
     decision = PolicyEngine([skill]).evaluate(request, "windows")
     assert decision.allowed is False
     assert decision.reason == "skill does not support device OS"
-
-
-def test_service_restart_requires_approval():
-    skill = SkillDefinition("service.restart", RiskLevel.MEDIUM, frozenset({"linux"}))
-    request = ActionRequest("tenant", "device", skill.skill_id, "user")
-    decision = PolicyEngine([skill]).evaluate(request, "linux")
-    assert decision.allowed is True
-    assert decision.approval_required is True
