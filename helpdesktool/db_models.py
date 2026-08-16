@@ -129,10 +129,6 @@ class Action(Base):
     risk: Mapped[str] = mapped_column(String(30))
     status: Mapped[str] = mapped_column(String(30))
     approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
-    claim_token_hash: Mapped[str | None] = mapped_column(String(64))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    attempt: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -170,9 +166,6 @@ class ExecutionResultRow(Base):
     success: Mapped[bool] = mapped_column(Boolean)
     output: Mapped[dict] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
-    verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    rollback_attempted: Mapped[bool] = mapped_column(Boolean, default=False)
-    rollback_succeeded: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -214,58 +207,3 @@ class IdempotencyRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-
-
-class DomainEventRow(Base):
-    __tablename__ = "domain_events"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(
-        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
-    )
-    event_type: Mapped[str] = mapped_column(String(100), index=True)
-    subject_id: Mapped[str] = mapped_column(String(100), index=True)
-    schema_version: Mapped[int] = mapped_column(Integer, default=1)
-    data: Mapped[dict] = mapped_column(JSON)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class WebhookSubscription(Base):
-    __tablename__ = "webhook_subscriptions"
-    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    tenant_id: Mapped[str] = mapped_column(
-        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
-    )
-    name: Mapped[str] = mapped_column(String(100))
-    url: Mapped[str] = mapped_column(String(2048))
-    secret_ref: Mapped[str] = mapped_column(String(255))
-    event_types: Mapped[list] = mapped_column(JSON)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class WebhookDelivery(Base):
-    __tablename__ = "webhook_deliveries"
-    __table_args__ = (UniqueConstraint("event_id", "subscription_id"),)
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    tenant_id: Mapped[str] = mapped_column(
-        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
-    )
-    event_id: Mapped[str] = mapped_column(
-        ForeignKey("domain_events.id", ondelete="CASCADE"), index=True
-    )
-    subscription_id: Mapped[str] = mapped_column(
-        ForeignKey("webhook_subscriptions.id", ondelete="CASCADE"), index=True
-    )
-    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
-    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
-    next_attempt_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
-    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    response_status: Mapped[int | None] = mapped_column(Integer)
-    last_error: Mapped[str | None] = mapped_column(Text)

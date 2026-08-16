@@ -10,25 +10,16 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk"
     bootstrap_token: str = "change-me-before-use"
-    job_claim_secret: str = "change-me-before-use"
     environment: str = "development"
-    service_allowlist: str = ""
-    webhook_allow_http: bool = False
-    webhook_timeout_seconds: float = 10.0
-    webhook_max_attempts: int = 8
-
-    @property
-    def allowed_services(self) -> frozenset[str]:
-        return frozenset(
-            item.strip() for item in self.service_allowlist.split(",") if item.strip()
-        )
 
     def validate_security(self) -> None:
-        if self.environment != "development" and "change-me-before-use" in {
-            self.bootstrap_token,
-            self.job_claim_secret,
-        }:
-            raise RuntimeError("bootstrap and job claim secrets must be changed")
+        if (
+            self.environment != "development"
+            and self.bootstrap_token == "change-me-before-use"
+        ):
+            raise RuntimeError(
+                "HELPDESK_BOOTSTRAP_TOKEN must be changed outside development"
+            )
 
 
 @lru_cache

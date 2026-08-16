@@ -13,9 +13,6 @@ from helpdesktool.api import app
 from helpdesktool.config import get_settings
 from helpdesktool.database import Base, get_session
 from helpdesktool.db_models import User
-from helpdesktool.db_models import WebhookDelivery
-from helpdesktool.integrations import DeliveryResponse
-from helpdesktool.webhook_worker import WebhookWorker
 
 
 @pytest.fixture
@@ -31,7 +28,6 @@ def client(monkeypatch):
             yield session
 
     monkeypatch.setenv("HELPDESK_BOOTSTRAP_TOKEN", "test-bootstrap-token")
-    monkeypatch.setenv("HELPDESK_SERVICE_ALLOWLIST", "demo.service")
     get_settings.cache_clear()
     app.dependency_overrides[get_session] = override_session
     with TestClient(app) as test_client:
@@ -40,7 +36,7 @@ def client(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatch):
+def test_tenant_device_telemetry_ticket_and_approval_workflow(client):
     http, factory = client
     response = http.post(
         "/v1/tenants",
@@ -53,20 +49,6 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
         "X-Tenant-ID": identity["tenant_id"],
         "X-User-ID": identity["admin_user_id"],
     }
-    monkeypatch.setattr(
-        "helpdesktool.api.validate_webhook_url", lambda *args, **kwargs: None
-    )
-    webhook = http.post(
-        "/v1/integrations/webhooks",
-        headers=owner_headers,
-        json={
-            "name": "n8n",
-            "url": "https://example.com/webhook",
-            "secret_ref": "env:HELPDESK_WEBHOOK_SECRET_N8N",
-            "event_types": ["ticket.created", "remediation.requested"],
-        },
-    )
-    assert webhook.status_code == 201
 
     enrolled = http.post(
         "/v1/devices/enroll",
@@ -107,7 +89,6 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
             "device_id": device["device_id"],
             "ticket_id": ticket.json()["id"],
             "skill_id": "service.restart",
-            "parameters": {"service": "demo.service"},
         },
     )
     assert action.status_code == 201
@@ -133,48 +114,6 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
     )
     assert approved.status_code == 200
     assert approved.json()["status"] == "queued"
-    jobs = http.get(
-        f"/v1/devices/{device['device_id']}/jobs",
-        headers={"Authorization": f"Bearer {device['agent_token']}"},
-    )
-    assert [job["id"] for job in jobs.json()] == [action.json()["id"]]
-    assert (
-        http.get(
-            f"/v1/devices/{device['device_id']}/jobs",
-            headers={"Authorization": "Bearer wrong-device-token"},
-        ).status_code
-        == 401
-    )
-    claim = http.post(
-        f"/v1/devices/{device['device_id']}/jobs/{action.json()['id']}/claim",
-        headers={
-            "Authorization": f"Bearer {device['agent_token']}",
-            "Idempotency-Key": "claim-1",
-        },
-        json={},
-    )
-    assert claim.status_code == 200
-    assert (
-        http.post(
-            f"/v1/devices/{device['device_id']}/jobs/{action.json()['id']}/claim",
-            headers={
-                "Authorization": f"Bearer {device['agent_token']}",
-                "Idempotency-Key": "claim-1",
-            },
-            json={},
-        ).json()
-        == claim.json()
-    )
-    result = http.post(
-        f"/v1/devices/{device['device_id']}/jobs/{action.json()['id']}/result",
-        headers={
-            "Authorization": f"Bearer {device['agent_token']}",
-            "Idempotency-Key": "result-1",
-            "X-Claim-Token": claim.json()["claim_token"],
-        },
-        json={"success": True, "verified": True, "output": {"service": "demo.service"}},
-    )
-    assert result.json()["status"] == "succeeded"
     audit = http.get("/v1/audit", headers=owner_headers)
     assert audit.status_code == 200
     assert {event["event_type"] for event in audit.json()} >= {
@@ -184,26 +123,4 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
         "policy.evaluated",
         "action.approved",
         "execution.queued",
-        "execution.claimed",
-        "execution.reported",
     }
-
-    class Provider:
-        def deliver(self, url, event_id, payload, secret, timeout_seconds):
-            assert secret == "integration-secret"
-            return DeliveryResponse(204, "")
-
-    monkeypatch.setattr(
-        "helpdesktool.webhook_worker.validate_webhook_url", lambda *args, **kwargs: None
-    )
-    with factory() as session:
-        settings = get_settings()
-        processed = WebhookWorker(
-            Provider(),
-            settings,
-            {"HELPDESK_WEBHOOK_SECRET_N8N": "integration-secret"},
-        ).process_batch(session)
-        assert processed >= 2
-        assert {row.status for row in session.query(WebhookDelivery).all()} == {
-            "delivered"
-        }
