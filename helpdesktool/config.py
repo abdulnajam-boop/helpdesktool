@@ -34,6 +34,16 @@ class Settings(BaseSettings):
             self.job_claim_secret,
         }:
             raise RuntimeError("bootstrap and job claim secrets must be changed")
+    environment: str = "development"
+
+    def validate_security(self) -> None:
+        if (
+            self.environment != "development"
+            and self.bootstrap_token == "change-me-before-use"
+        ):
+            raise RuntimeError(
+                "HELPDESK_BOOTSTRAP_TOKEN must be changed outside development"
+            )
 
 
 @lru_cache

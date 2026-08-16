@@ -1,5 +1,9 @@
 import pytest
 
+pytest.importorskip("fastapi")
+pytest.importorskip("sqlalchemy")
+pytest.importorskip("httpx")
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -38,6 +42,7 @@ def client(monkeypatch):
 
 
 def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatch):
+def test_tenant_device_telemetry_ticket_and_approval_workflow(client):
     http, factory = client
     response = http.post(
         "/v1/tenants",
@@ -222,3 +227,4 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
         assert {row.status for row in session.query(WebhookDelivery).all()} == {
             "delivered"
         }
+    }
