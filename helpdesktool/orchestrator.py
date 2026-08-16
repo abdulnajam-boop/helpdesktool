@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, Protocol
 from typing import Protocol
 
 from .audit import AuditSink
@@ -10,6 +11,7 @@ from .models import (
     ActionRequest,
     ActionStatus,
     ExecutionResult,
+    RiskLevel,
     SkillDefinition,
 )
 from .policy import PolicyEngine
@@ -27,6 +29,20 @@ class SkillExecutor(Protocol):
     ) -> ExecutionResult: ...
 
 
+class ActionStore(Protocol):
+    def add(self, record: ActionRecord) -> None: ...
+    def get(self, tenant_id: str, correlation_id: str) -> ActionRecord | None: ...
+    def update(self, record: ActionRecord) -> None: ...
+
+
+class ActionOrchestrator:
+    def __init__(
+        self,
+        policy: PolicyEngine,
+        executor: SkillExecutor,
+        audit: AuditSink,
+        action_store: ActionStore | None = None,
+        execute_immediately: bool = True,
 class ActionOrchestrator:
     def __init__(
         self, policy: PolicyEngine, executor: SkillExecutor, audit: AuditSink
@@ -35,6 +51,8 @@ class ActionOrchestrator:
         self._executor = executor
         self._audit = audit
         self._actions: dict[str, ActionRecord] = {}
+        self._action_store = action_store
+        self._execute_immediately = execute_immediately
 
     def submit(self, request: ActionRequest, device_os: str) -> ActionRecord:
         if request.correlation_id in self._actions:
@@ -50,6 +68,8 @@ class ActionOrchestrator:
         risk = decision.skill.risk if decision.skill else self._unknown_risk()
         record = ActionRecord(request, device_os, risk, status)
         self._actions[request.correlation_id] = record
+        if self._action_store:
+            self._action_store.add(record)
         self._event(
             record,
             "policy.evaluated",
@@ -62,6 +82,8 @@ class ActionOrchestrator:
             },
         )
         if status is ActionStatus.APPROVED:
+            self._execute_or_queue(record, decision.skill)
+        self._persist(record)
             self._run(record, decision.skill)
         return record
 
@@ -79,6 +101,41 @@ class ActionOrchestrator:
             self._event(
                 record, "approval.invalidated", approver_id, {"reason": decision.reason}
             )
+            self._persist(record)
+            return record
+        record.approved_by = approver_id
+        record.status = ActionStatus.APPROVED
+        self._event(
+            record,
+            "action.approved",
+            approver_id,
+            {
+                "previous_status": ActionStatus.PENDING_APPROVAL.value,
+                "new_status": ActionStatus.APPROVED.value,
+            },
+        )
+        self._execute_or_queue(record, decision.skill)
+        self._persist(record)
+        return record
+
+    def _execute_or_queue(
+        self, record: ActionRecord, skill: SkillDefinition | None
+    ) -> None:
+        if self._execute_immediately:
+            self._run(record, skill)
+            return
+        record.status = ActionStatus.QUEUED
+        self._event(
+            record,
+            "execution.queued",
+            "system",
+            {
+                "skill_id": record.request.skill_id,
+                "previous_status": ActionStatus.APPROVED.value,
+                "new_status": ActionStatus.QUEUED.value,
+            },
+        )
+
             return record
         record.approved_by = approver_id
         record.status = ActionStatus.APPROVED
@@ -129,10 +186,42 @@ class ActionOrchestrator:
 
     def _get_for_tenant(self, tenant_id: str, correlation_id: str) -> ActionRecord:
         record = self._actions.get(correlation_id)
+        if record is None and self._action_store:
+            record = self._action_store.get(tenant_id, correlation_id)
         if record is None or record.request.tenant_id != tenant_id:
             raise KeyError("action not found")
         return record
 
+    def deny(
+        self, tenant_id: str, correlation_id: str, actor_id: str, reason: str
+    ) -> ActionRecord:
+        record = self._get_for_tenant(tenant_id, correlation_id)
+        if record.status is not ActionStatus.PENDING_APPROVAL:
+            raise ValueError("action is not pending approval")
+        record.status = ActionStatus.DENIED
+        self._event(
+            record,
+            "action.denied",
+            actor_id,
+            {
+                "reason": reason,
+                "previous_status": ActionStatus.PENDING_APPROVAL.value,
+                "new_status": ActionStatus.DENIED.value,
+            },
+        )
+        self._persist(record)
+        return record
+
+    def _persist(self, record: ActionRecord) -> None:
+        if self._action_store:
+            self._action_store.update(record)
+
+    def _event(
+        self,
+        record: ActionRecord,
+        event_type: str,
+        actor_id: str,
+        details: dict[str, Any],
     def _event(
         self, record: ActionRecord, event_type: str, actor_id: str, details: dict
     ) -> None:
@@ -145,6 +234,7 @@ class ActionOrchestrator:
         )
 
     @staticmethod
+    def _unknown_risk() -> RiskLevel:
     def _unknown_risk():
         from .models import RiskLevel
 

@@ -74,6 +74,17 @@ class InMemoryAuditLog:
                     payload, sort_keys=True, separators=(",", ":"), default=str
                 ).encode()
             ).hexdigest()
+            event = AuditEvent(
+                sequence=sequence,
+                occurred_at=occurred_at,
+                tenant_id=tenant_id,
+                correlation_id=correlation_id,
+                event_type=event_type,
+                actor_id=actor_id,
+                details=dict(details),
+                previous_hash=previous_hash,
+                event_hash=digest,
+            )
             event = AuditEvent(**payload, event_hash=digest)
             self._events.append(event)
             return event

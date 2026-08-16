@@ -36,5 +36,18 @@ services:
     cap_drop: ["ALL"]
     restart: unless-stopped
 
+  webhook-worker:
+    build: .
+    env_file: .env
+    command: ["helpdesk-webhook-worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
 volumes:
   postgres-data:

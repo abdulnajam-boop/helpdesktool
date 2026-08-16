@@ -102,3 +102,33 @@ def test_cross_tenant_approval_is_hidden():
         raise AssertionError("cross-tenant access should fail")
     except KeyError:
         pass
+
+
+def test_control_plane_mode_queues_without_local_execution():
+    skill = SkillDefinition(
+        "diagnostics.collect", RiskLevel.READ_ONLY, frozenset({"linux"})
+    )
+    audit = InMemoryAuditLog()
+    executor = FakeExecutor()
+    orchestrator = ActionOrchestrator(
+        PolicyEngine([skill]), executor, audit, execute_immediately=False
+    )
+
+    record = orchestrator.submit(request("diagnostics.collect"), "linux")
+
+    assert record.status is ActionStatus.QUEUED
+    assert executor.executions == 0
+    assert audit.events[-1].event_type == "execution.queued"
+
+
+def test_pending_action_can_be_denied_and_audited():
+    orchestrator, executor, audit = build(RiskLevel.HIGH)
+    record = orchestrator.submit(request(), "linux")
+
+    denied = orchestrator.deny(
+        "tenant-a", record.request.correlation_id, "approver-2", "outside window"
+    )
+
+    assert denied.status is ActionStatus.DENIED
+    assert executor.executions == 0
+    assert audit.events[-1].event_type == "action.denied"

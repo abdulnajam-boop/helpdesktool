@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_session
 from .db_models import Device, User
+from .config import get_settings
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,11 @@ def require_user(
     user_id: str = Header(alias="X-User-ID"),
     session: Session = Depends(get_session),
 ) -> Principal:
+    if not get_settings().allow_insecure_header_auth:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "human authentication is not configured",
+        )
     user = session.scalar(
         select(User).where(
             User.id == user_id, User.tenant_id == tenant_id, User.active.is_(True)
