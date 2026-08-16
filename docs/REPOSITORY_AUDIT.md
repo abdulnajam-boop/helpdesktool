@@ -32,38 +32,11 @@ in-memory adapters are testable reference implementations, not production storag
 
 ## Known limitations
 
-- The original reference adapters remain process-local, while the control plane now
-  persists state and uses database transactions, idempotency keys, leases, and an outbox.
+- State is process-local and does not survive restart; concurrent distributed workers
+  require database transactions, idempotency keys, leases, and an outbox.
 - The device OS context passed at submission is temporary. The control plane must
   resolve authoritative, signed inventory server-side.
 - Authentication, authorization roles, approval expiry/quorum, artifact signing,
   transport security, secret redaction, and durable audit retention remain unbuilt.
 - Executors are interfaces only. No command execution is shipped until sandboxing,
   signed skills, bounded output, timeout, and least-privilege service identities exist.
-
-## Control-plane increment
-
-The repository now includes a runnable FastAPI/PostgreSQL control plane, Alembic
-migration, Docker Compose deployment, persistent action/audit adapters, tenant-scoped
-queries, basic roles, hashed device credentials, request idempotency, telemetry, ticket,
-action, approval, and audit APIs. Header-based user identity and the bootstrap token are
-development foundations, not production authentication. PostgreSQL RLS, OIDC, token
-rotation, audit sequence locking, signed agent jobs, and outbox observability remain required.
-
-## Capability gap analysis (2026-08-16)
-
-| Capability | Classification | Current assessment |
-| --- | --- | --- |
-| FastAPI control plane and PostgreSQL schema | `PARTIAL` | Runnable prototype; route modularization and production operations remain. |
-| Linux endpoint inventory and one remediation | `PARTIAL` | Useful v0.1; identity, upgrades and crash-safe execution journal remain. |
-| Windows endpoint agent | `MISSING` | Explicitly deferred until Linux trust hardening. |
-| Policy, approval and deterministic execution | `PARTIAL` | Core invariants work; versioned registry and tenant policy administration remain. |
-| Tenant isolation | `SECURITY RISK` | Application filters exist; OIDC and PostgreSQL RLS are absent. |
-| Audit history | `NEEDS REFACTOR` | Persistent chained events exist; concurrent sequence locking and immutable export are absent. |
-| Incident engine | `MISSING` | Tickets do not yet correlate observations into incidents. |
-| Event/integration outbox | `DONE` | Canonical events, transactional fan-out, signed webhooks and bounded worker implemented for MVP. |
-| n8n integration | `DONE` | Generic webhook compatibility; n8n remains outside the security boundary. |
-| AI/RAG/provider abstraction | `MISSING` | No model calls or provider coupling exist. |
-| Secrets abstraction | `PARTIAL` | Webhooks use a narrow environment provider; cloud providers remain. |
-| Dashboard/frontend | `MISSING` | No frontend exists. |
-| CI/CD and production infrastructure | `MISSING` | Compose exists; CI, RLS tests, Helm/Terraform and deployment controls do not. |

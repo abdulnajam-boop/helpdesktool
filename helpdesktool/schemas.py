@@ -3,8 +3,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from .events import EventType
-
 
 class TenantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -50,21 +48,3 @@ class ActionCreate(BaseModel):
 class ApprovalDecision(BaseModel):
     decision: Literal["approve", "deny"]
     reason: str = Field(default="", max_length=2000)
-
-
-class JobResult(BaseModel):
-    success: bool
-    verified: bool
-    output: dict[str, Any] = Field(default_factory=dict)
-    error: str | None = Field(default=None, max_length=4000)
-    rollback_attempted: bool = False
-    rollback_succeeded: bool | None = None
-
-
-class WebhookSubscriptionCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    url: str = Field(min_length=1, max_length=2048)
-    secret_ref: str = Field(
-        pattern=r"^env:HELPDESK_WEBHOOK_SECRET_[A-Z0-9_]+$", max_length=255
-    )
-    event_types: list[EventType] = Field(min_length=1, max_length=25)
