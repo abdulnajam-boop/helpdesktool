@@ -1,0 +1,10 @@
+{
+  "server_url": "http://localhost:8000",
+  "external_id": "linux-lab-01",
+  "tenant_id": "replace-with-tenant-id",
+  "user_id": "replace-with-owner-user-id",
+  "heartbeat_seconds": 60,
+  "inventory_seconds": 3600,
+  "allowed_services": ["helpdesk-demo.service"],
+  "monitored_services": ["helpdesk-demo.service"]
+}

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helpdesktool"
+version = "0.1.0"
+description = "Safety-first orchestration core for an autonomous IT help desk"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "alembic>=1.13,<2",
+    "fastapi>=0.115,<1",
+    "psycopg[binary]>=3.2,<4",
+    "pydantic-settings>=2.6,<3",
+    "sqlalchemy>=2.0,<3",
+    "uvicorn[standard]>=0.32,<1",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27,<1", "mypy>=1.13,<2", "pytest>=8,<10", "ruff>=0.8,<1"]
+
+[project.scripts]
+helpdesk-linux-agent = "linux_agent.agent:main"
+helpdesk-webhook-worker = "helpdesktool.webhook_worker:main"
+helpdesk-seed = "helpdesktool.seed:seed"
+
+[project.urls]
+Homepage = "https://github.com/abdulnajam-boop/helpdesktool"
+Repository = "https://github.com/abdulnajam-boop/helpdesktool.git"
+Issues = "https://github.com/abdulnajam-boop/helpdesktool/issues"
+
+[tool.setuptools.packages.find]
+include = ["helpdesktool*", "linux_agent*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["helpdesktool", "linux_agent"]
