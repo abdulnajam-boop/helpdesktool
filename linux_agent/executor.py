@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
+
 SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 
 

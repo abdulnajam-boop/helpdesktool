@@ -33,12 +33,12 @@ Issues = "https://github.com/abdulnajam-boop/helpdesktool/issues"
 [tool.setuptools]
 packages = ["helpdesktool", "linux_agent"]
 
+[tool.setuptools.packages.find]
+include = ["helpdesktool*"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-
-[tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.mypy]
 python_version = "3.11"

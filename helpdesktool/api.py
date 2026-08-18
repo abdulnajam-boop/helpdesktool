@@ -9,6 +9,13 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from sqlalchemy import select, text, update
+import json
+import secrets
+from datetime import UTC, datetime
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException, status
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,15 +28,20 @@ from .db_models import (
     AuditEventRow,
     Device,
     DeviceInventory,
-    ExecutionResultRow,
     Heartbeat,
     IdempotencyRecord,
+    ExecutionResultRow,
     Tenant,
     Ticket,
     User,
     WebhookSubscription,
 )
+from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
 from .integrations import validate_webhook_url
+    Tenant,
+    Ticket,
+    User,
+)
 from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
@@ -45,7 +57,11 @@ from .schemas import (
     TicketCreate,
     TicketUpdate,
     WebhookSubscriptionCreate,
+    TenantCreate,
+    TicketCreate,
+    TicketUpdate,
 )
+
 
 app = FastAPI(title="Helpdesktool Control Plane", version="0.2.0")
 
@@ -231,6 +247,7 @@ def heartbeat(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     payload = {"device_id": device_id, **body.model_dump()}
+    payload = body.model_dump()
     if cached := idempotency_lookup(
         session, principal.tenant_id, "heartbeat", idempotency_key, payload
     ):
@@ -260,6 +277,7 @@ def inventory(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     payload = {"device_id": device_id, **body.model_dump(mode="json")}
+    payload = body.model_dump(mode="json")
     if cached := idempotency_lookup(
         session, principal.tenant_id, "inventory", idempotency_key, payload
     ):

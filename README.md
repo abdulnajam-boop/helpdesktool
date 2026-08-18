@@ -54,6 +54,9 @@ PostgreSQL. It reuses the default-deny policy and orchestration state machine. A
 jobs are queued only; the control plane deliberately cannot execute OS commands.
 The Linux agent v0.1 enrolls, reports health/inventory, polls device-bound jobs, and
 executes only the allowlisted deterministic `service.restart` skill.
+The safety orchestration foundation now includes typed skill/action contracts, a
+default-deny policy engine, independent approvals, verification/rollback transitions,
+tenant-scoped action access, and a hash-chained audit reference adapter.
 
 See the [repository audit](docs/REPOSITORY_AUDIT.md), [production architecture](docs/ARCHITECTURE.md),
 and [prioritized implementation plan](docs/IMPLEMENTATION_PLAN.md). Current persistence
@@ -160,3 +163,8 @@ credentials. Local HTTP delivery can be enabled only with
 
 See [the external project evaluation](docs/OPEN_SOURCE_EVALUATION.md) for the explicit
 build/integrate/avoid decisions and licensing cautions.
+Requires Python 3.11 or newer. The foundation has no runtime third-party dependencies.
+
+```bash
+python -m pytest
+```

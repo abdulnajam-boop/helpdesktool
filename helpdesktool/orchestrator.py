@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Protocol
+from typing import Protocol
 
 from .audit import AuditSink
 from .models import (
@@ -42,6 +43,9 @@ class ActionOrchestrator:
         audit: AuditSink,
         action_store: ActionStore | None = None,
         execute_immediately: bool = True,
+class ActionOrchestrator:
+    def __init__(
+        self, policy: PolicyEngine, executor: SkillExecutor, audit: AuditSink
     ) -> None:
         self._policy = policy
         self._executor = executor
@@ -80,6 +84,7 @@ class ActionOrchestrator:
         if status is ActionStatus.APPROVED:
             self._execute_or_queue(record, decision.skill)
         self._persist(record)
+            self._run(record, decision.skill)
         return record
 
     def approve(
@@ -130,6 +135,13 @@ class ActionOrchestrator:
                 "new_status": ActionStatus.QUEUED.value,
             },
         )
+
+            return record
+        record.approved_by = approver_id
+        record.status = ActionStatus.APPROVED
+        self._event(record, "action.approved", approver_id, {})
+        self._run(record, decision.skill)
+        return record
 
     def _run(self, record: ActionRecord, skill: SkillDefinition | None) -> None:
         if skill is None:
@@ -210,6 +222,8 @@ class ActionOrchestrator:
         event_type: str,
         actor_id: str,
         details: dict[str, Any],
+    def _event(
+        self, record: ActionRecord, event_type: str, actor_id: str, details: dict
     ) -> None:
         self._audit.append(
             tenant_id=record.request.tenant_id,
@@ -221,4 +235,7 @@ class ActionOrchestrator:
 
     @staticmethod
     def _unknown_risk() -> RiskLevel:
+    def _unknown_risk():
+        from .models import RiskLevel
+
         return RiskLevel.PROHIBITED

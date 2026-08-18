@@ -7,9 +7,9 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .config import get_settings
 from .database import get_session
 from .db_models import Device, User
+from .config import get_settings
 
 
 @dataclass(frozen=True)
