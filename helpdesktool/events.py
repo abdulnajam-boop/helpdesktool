@@ -17,6 +17,7 @@ class EventType(StrEnum):
     INCIDENT_CREATED = "incident.created"
     INCIDENT_UPDATED = "incident.updated"
     INCIDENT_RESOLVED = "incident.resolved"
+    INCIDENT_REOPENED = "incident.reopened"
     REMEDIATION_REQUESTED = "remediation.requested"
     REMEDIATION_STARTED = "remediation.started"
     REMEDIATION_SUCCEEDED = "remediation.succeeded"
@@ -26,6 +27,8 @@ class EventType(StrEnum):
     APPROVAL_APPROVED = "approval.approved"
     APPROVAL_DENIED = "approval.denied"
     TICKET_CREATED = "ticket.created"
+    TICKET_UPDATED = "ticket.updated"
+    TICKET_RESOLVED = "ticket.resolved"
     TICKET_ESCALATED = "ticket.escalated"
     SECURITY_ALERT = "security.alert"
 
@@ -40,6 +43,12 @@ AUDIT_EVENT_MAPPING: dict[str, EventType] = {
     "execution.failed": EventType.REMEDIATION_FAILED,
     "rollback.completed": EventType.REMEDIATION_ROLLED_BACK,
     "ticket.created": EventType.TICKET_CREATED,
+    "ticket.updated": EventType.TICKET_UPDATED,
+    "ticket.resolved": EventType.TICKET_RESOLVED,
+    "incident.created": EventType.INCIDENT_CREATED,
+    "incident.updated": EventType.INCIDENT_UPDATED,
+    "incident.reopened": EventType.INCIDENT_REOPENED,
+    "incident.resolved": EventType.INCIDENT_RESOLVED,
     "action.escalation_required": EventType.TICKET_ESCALATED,
 }
 

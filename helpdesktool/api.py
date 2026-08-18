@@ -7,15 +7,9 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
-from sqlalchemy import select, text, update
-import json
-import secrets
-from datetime import UTC, datetime
-from typing import Any
-
-from fastapi import Depends, FastAPI, Header, HTTPException, status
-from sqlalchemy import select, text
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,20 +22,20 @@ from .db_models import (
     AuditEventRow,
     Device,
     DeviceInventory,
+    ExecutionResultRow,
     Heartbeat,
     IdempotencyRecord,
-    ExecutionResultRow,
+    Incident,
     Tenant,
     Ticket,
     User,
+    WebhookDelivery,
     WebhookSubscription,
 )
-from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
+from .development_auth import issue_session
+from .events import EventType
+from .incidents import detect_inventory_incidents, incident_json
 from .integrations import validate_webhook_url
-    Tenant,
-    Ticket,
-    User,
-)
 from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
@@ -53,17 +47,21 @@ from .schemas import (
     HeartbeatCreate,
     InventoryCreate,
     JobResult,
+    LowDiskSimulation,
     TenantCreate,
     TicketCreate,
     TicketUpdate,
     WebhookSubscriptionCreate,
-    TenantCreate,
-    TicketCreate,
-    TicketUpdate,
 )
 
-
 app = FastAPI(title="Helpdesktool Control Plane", version="0.2.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().allowed_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+)
 
 SKILLS = [
     SkillDefinition(
@@ -179,6 +177,55 @@ def readiness(session: Session = Depends(get_session)) -> dict[str, str]:
     return {"status": "ready"}
 
 
+def _require_development_login() -> None:
+    settings = get_settings()
+    if settings.environment != "development" or not settings.development_login_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+
+
+@app.get("/v1/auth/development/users")
+def development_users(session: Session = Depends(get_session)) -> list[dict[str, str]]:
+    _require_development_login()
+    rows = session.execute(
+        select(User, Tenant.name)
+        .join(Tenant, Tenant.id == User.tenant_id)
+        .where(User.active.is_(True))
+        .order_by(User.email)
+    ).all()
+    return [
+        {"id": user.id, "email": user.email, "role": user.role, "tenant": tenant}
+        for user, tenant in rows
+    ]
+
+
+@app.post("/v1/auth/development/login")
+def development_login(
+    user_id: str = Query(min_length=1), session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    _require_development_login()
+    user = session.scalar(select(User).where(User.id == user_id, User.active.is_(True)))
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid development user")
+    settings = get_settings()
+    token = issue_session(
+        user.id,
+        user.tenant_id,
+        settings.development_session_secret,
+        settings.development_session_minutes,
+    )
+    return {"access_token": token, "token_type": "bearer", "user": _user_json(user)}
+
+
+@app.get("/v1/auth/me")
+def current_user(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    return _user_json(
+        tenant_row(session, User, principal.actor_id, principal.tenant_id)
+    )
+
+
 @app.post("/v1/tenants", status_code=201)
 def create_tenant(
     body: TenantCreate,
@@ -247,7 +294,6 @@ def heartbeat(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     payload = {"device_id": device_id, **body.model_dump()}
-    payload = body.model_dump()
     if cached := idempotency_lookup(
         session, principal.tenant_id, "heartbeat", idempotency_key, payload
     ):
@@ -277,7 +323,6 @@ def inventory(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     payload = {"device_id": device_id, **body.model_dump(mode="json")}
-    payload = body.model_dump(mode="json")
     if cached := idempotency_lookup(
         session, principal.tenant_id, "inventory", idempotency_key, payload
     ):
@@ -290,12 +335,97 @@ def inventory(
     )
     session.add(row)
     session.flush()
-    result = {"accepted": True, "inventory_id": row.id}
+    incidents = detect_inventory_incidents(
+        session,
+        principal.tenant_id,
+        device_id,
+        body.payload,
+        body.collected_at,
+        get_settings(),
+    )
+    result = {
+        "accepted": True,
+        "inventory_id": row.id,
+        "incident_ids": [incident.id for incident in incidents],
+    }
     remember(
         session, principal.tenant_id, "inventory", idempotency_key, payload, result, 202
     )
     session.commit()
     return result
+
+
+@app.post("/v1/development/simulations/low-disk")
+def simulate_low_disk(
+    body: LowDiskSimulation,
+    principal: Principal = Depends(require_roles("owner", "admin", "operator")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _require_development_login()
+    device = tenant_row(session, Device, body.device_id, principal.tenant_id)
+    if device.os != "linux":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "low-disk simulation requires a Linux device",
+        )
+    now = datetime.now(UTC)
+    total_bytes = 100 * 1024**3
+    payload = {
+        "simulation": True,
+        "filesystems": [
+            {
+                "device": "/dev/simulated",
+                "mountpoint": body.mountpoint,
+                "filesystem": "ext4",
+                "total_bytes": total_bytes,
+                "free_bytes": int(total_bytes * (100 - body.used_percent) / 100),
+            }
+        ],
+    }
+    inventory_row = DeviceInventory(
+        tenant_id=principal.tenant_id,
+        device_id=device.id,
+        collected_at=now,
+        payload=payload,
+    )
+    session.add(inventory_row)
+    session.flush()
+    incidents = detect_inventory_incidents(
+        session,
+        principal.tenant_id,
+        device.id,
+        payload,
+        now,
+        get_settings(),
+    )
+    audit(
+        session,
+        principal.tenant_id,
+        device.id,
+        "development.low_disk.simulated",
+        principal.actor_id,
+        {
+            "inventory_id": inventory_row.id,
+            "mountpoint": body.mountpoint,
+            "used_percent": body.used_percent,
+        },
+    )
+    session.commit()
+    current = session.scalar(
+        select(Incident)
+        .where(
+            Incident.tenant_id == principal.tenant_id,
+            Incident.device_id == device.id,
+            Incident.correlation_key == f"low_disk_space:{body.mountpoint}",
+        )
+        .order_by(Incident.last_observed_at.desc())
+    )
+    return {
+        "accepted": True,
+        "inventory_id": inventory_row.id,
+        "incident_ids": [row.id for row in incidents],
+        "incident": incident_json(current) if current else None,
+    }
 
 
 @app.get("/v1/devices")
@@ -306,7 +436,7 @@ def list_devices(
     rows = session.scalars(
         select(Device).where(Device.tenant_id == principal.tenant_id)
     ).all()
-    return [device_json(row) for row in rows]
+    return [_device_summary(session, row, principal.tenant_id) for row in rows]
 
 
 @app.get("/v1/devices/{device_id}")
@@ -316,7 +446,256 @@ def get_device(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     row = tenant_row(session, Device, device_id, principal.tenant_id)
-    return device_json(row)
+    result = device_json(row)
+    inventory_row = session.scalar(
+        select(DeviceInventory)
+        .where(
+            DeviceInventory.tenant_id == principal.tenant_id,
+            DeviceInventory.device_id == device_id,
+        )
+        .order_by(DeviceInventory.collected_at.desc())
+    )
+    result["inventory"] = inventory_row.payload if inventory_row else None
+    result["incidents"] = [
+        incident_json(item)
+        for item in session.scalars(
+            select(Incident)
+            .where(
+                Incident.tenant_id == principal.tenant_id,
+                Incident.device_id == device_id,
+            )
+            .order_by(Incident.last_observed_at.desc())
+            .limit(10)
+        ).all()
+    ]
+    result["tickets"] = [
+        ticket_json(item)
+        for item in session.scalars(
+            select(Ticket)
+            .where(
+                Ticket.tenant_id == principal.tenant_id, Ticket.device_id == device_id
+            )
+            .order_by(Ticket.updated_at.desc())
+            .limit(10)
+        ).all()
+    ]
+    result["actions"] = [
+        action_json(item)
+        for item in session.scalars(
+            select(Action)
+            .where(
+                Action.tenant_id == principal.tenant_id, Action.device_id == device_id
+            )
+            .order_by(Action.created_at.desc())
+            .limit(10)
+        ).all()
+    ]
+    heartbeat_row = session.scalar(
+        select(Heartbeat)
+        .where(
+            Heartbeat.tenant_id == principal.tenant_id,
+            Heartbeat.device_id == device_id,
+        )
+        .order_by(Heartbeat.received_at.desc())
+    )
+    result["latest_heartbeat"] = (
+        {
+            "received_at": heartbeat_row.received_at,
+            "status": heartbeat_row.status,
+        }
+        if heartbeat_row
+        else None
+    )
+    correlations = {
+        device_id,
+        *(item["id"] for item in result["incidents"]),
+        *(item["id"] for item in result["tickets"]),
+        *(item["id"] for item in result["actions"]),
+    }
+    result["audit"] = _audit_for(session, principal.tenant_id, correlations)
+    return result
+
+
+@app.get("/v1/dashboard")
+def dashboard(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    tenant_id = principal.tenant_id
+    devices = session.scalars(select(Device).where(Device.tenant_id == tenant_id)).all()
+    online_cutoff = datetime.now(UTC) - timedelta(minutes=5)
+    recent_incidents = session.scalars(
+        select(Incident)
+        .where(Incident.tenant_id == tenant_id)
+        .order_by(Incident.last_observed_at.desc())
+        .limit(5)
+    ).all()
+    recent_tickets = session.scalars(
+        select(Ticket)
+        .where(Ticket.tenant_id == tenant_id)
+        .order_by(Ticket.updated_at.desc())
+        .limit(5)
+    ).all()
+    recent_actions = session.scalars(
+        select(Action)
+        .where(Action.tenant_id == tenant_id)
+        .order_by(Action.created_at.desc())
+        .limit(5)
+    ).all()
+    return {
+        "counts": {
+            "devices": len(devices),
+            "online_devices": sum(
+                1
+                for row in devices
+                if row.last_seen_at and _aware(row.last_seen_at) >= online_cutoff
+            ),
+            "offline_devices": sum(
+                1
+                for row in devices
+                if not row.last_seen_at or _aware(row.last_seen_at) < online_cutoff
+            ),
+            "open_tickets": _count(
+                session, Ticket, tenant_id, Ticket.status.in_(["open", "in_progress"])
+            ),
+            "open_incidents": _count(
+                session,
+                Incident,
+                tenant_id,
+                Incident.status.in_(["open", "investigating"]),
+            ),
+            "pending_approvals": _count(
+                session, Action, tenant_id, Action.status == "pending_approval"
+            ),
+            "failed_actions": _count(
+                session,
+                Action,
+                tenant_id,
+                Action.status.in_(["failed", "rollback_failed"]),
+            ),
+        },
+        "recent_incidents": [incident_json(row) for row in recent_incidents],
+        "recent_tickets": [ticket_json(row) for row in recent_tickets],
+        "recent_actions": [action_json(row) for row in recent_actions],
+    }
+
+
+@app.get("/v1/incidents")
+def list_incidents(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    return [
+        incident_json(row)
+        for row in session.scalars(
+            select(Incident)
+            .where(Incident.tenant_id == principal.tenant_id)
+            .order_by(Incident.last_observed_at.desc())
+        ).all()
+    ]
+
+
+@app.get("/v1/incidents/{incident_id}")
+def get_incident(
+    incident_id: str,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    row = tenant_row(session, Incident, incident_id, principal.tenant_id)
+    result = incident_json(row)
+    result["ticket"] = (
+        ticket_json(tenant_row(session, Ticket, row.ticket_id, principal.tenant_id))
+        if row.ticket_id
+        else None
+    )
+    result["actions"] = [
+        action_json(item)
+        for item in session.scalars(
+            select(Action).where(
+                Action.tenant_id == principal.tenant_id,
+                Action.ticket_id == row.ticket_id,
+            )
+        ).all()
+    ]
+    correlations = {row.id}
+    if row.ticket_id:
+        correlations.add(row.ticket_id)
+    correlations.update(item["id"] for item in result["actions"])
+    result["timeline"] = _audit_for(session, principal.tenant_id, correlations)
+    return result
+
+
+@app.get("/v1/tickets")
+def list_tickets(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    return [
+        ticket_json(row)
+        for row in session.scalars(
+            select(Ticket)
+            .where(Ticket.tenant_id == principal.tenant_id)
+            .order_by(Ticket.updated_at.desc())
+        ).all()
+    ]
+
+
+@app.get("/v1/tickets/{ticket_id}")
+def get_ticket(
+    ticket_id: str,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    row = tenant_row(session, Ticket, ticket_id, principal.tenant_id)
+    result = ticket_json(row)
+    incident = session.scalar(
+        select(Incident).where(
+            Incident.tenant_id == principal.tenant_id,
+            Incident.ticket_id == row.id,
+        )
+    )
+    actions = session.scalars(
+        select(Action).where(
+            Action.tenant_id == principal.tenant_id, Action.ticket_id == row.id
+        )
+    ).all()
+    result["incident"] = incident_json(incident) if incident else None
+    result["actions"] = [action_json(item) for item in actions]
+    correlations = {row.id, *(item.id for item in actions)}
+    if incident:
+        correlations.add(incident.id)
+    result["timeline"] = _audit_for(session, principal.tenant_id, correlations)
+    return result
+
+
+@app.get("/v1/actions")
+def list_actions(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    return [
+        action_json(row)
+        for row in session.scalars(
+            select(Action)
+            .where(Action.tenant_id == principal.tenant_id)
+            .order_by(Action.created_at.desc())
+        ).all()
+    ]
+
+
+@app.get("/v1/approvals")
+def list_approvals(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(Action)
+        .where(
+            Action.tenant_id == principal.tenant_id, Action.status == "pending_approval"
+        )
+        .order_by(Action.created_at)
+    ).all()
+    return [action_json(row) for row in rows]
 
 
 @app.post("/v1/actions", status_code=201)
@@ -401,7 +780,53 @@ def get_action(
     principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    return action_json(tenant_row(session, Action, action_id, principal.tenant_id))
+    row = tenant_row(session, Action, action_id, principal.tenant_id)
+    result = action_json(row)
+    approvals = session.scalars(
+        select(Approval).where(
+            Approval.tenant_id == principal.tenant_id,
+            Approval.action_id == row.id,
+        )
+    ).all()
+    executions = session.scalars(
+        select(ExecutionResultRow).where(
+            ExecutionResultRow.tenant_id == principal.tenant_id,
+            ExecutionResultRow.action_id == row.id,
+        )
+    ).all()
+    result["approvals"] = [
+        {
+            "decision": item.decision,
+            "decided_by": item.decided_by,
+            "reason": item.reason,
+            "decided_at": item.decided_at,
+        }
+        for item in approvals
+    ]
+    result["execution_results"] = [
+        {
+            "success": item.success,
+            "verified": item.verified,
+            "output": item.output,
+            "error": item.error,
+            "rollback_attempted": item.rollback_attempted,
+            "rollback_succeeded": item.rollback_succeeded,
+            "created_at": item.created_at,
+        }
+        for item in executions
+    ]
+    correlations = {row.id, *(filter(None, [row.ticket_id]))}
+    if row.ticket_id:
+        incident_id = session.scalar(
+            select(Incident.id).where(
+                Incident.tenant_id == principal.tenant_id,
+                Incident.ticket_id == row.ticket_id,
+            )
+        )
+        if incident_id:
+            correlations.add(incident_id)
+    result["timeline"] = _audit_for(session, principal.tenant_id, correlations)
+    return result
 
 
 @app.get("/v1/devices/{device_id}/jobs")
@@ -467,6 +892,7 @@ def claim_job(
         "id": row.id,
         "skill_id": row.skill_id,
         "parameters": row.parameters,
+        "device_os": row.device_os,
         "device_id": row.device_id,
         "attempt": row.attempt,
         "lease_expires_at": row.lease_expires_at.isoformat(),
@@ -612,15 +1038,19 @@ def report_job_result(
 @app.get("/v1/audit")
 def get_audit(
     limit: int = 100,
-    principal: Principal = Depends(require_roles("owner", "admin", "auditor")),
+    event_type: str | None = None,
+    correlation_id: str | None = None,
+    principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
+    query = select(AuditEventRow).where(AuditEventRow.tenant_id == principal.tenant_id)
+    if event_type:
+        query = query.where(AuditEventRow.event_type == event_type)
+    if correlation_id:
+        query = query.where(AuditEventRow.correlation_id == correlation_id)
     rows = session.scalars(
-        select(AuditEventRow)
-        .where(AuditEventRow.tenant_id == principal.tenant_id)
-        .order_by(AuditEventRow.sequence.desc())
-        .limit(limit)
+        query.order_by(AuditEventRow.sequence.desc()).limit(limit)
     ).all()
     return [
         {
@@ -729,7 +1159,7 @@ def create_webhook_subscription(
 
 @app.get("/v1/integrations/webhooks")
 def list_webhook_subscriptions(
-    principal: Principal = Depends(require_roles("owner", "admin", "auditor")),
+    principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     rows = session.scalars(
@@ -738,6 +1168,56 @@ def list_webhook_subscriptions(
         .order_by(WebhookSubscription.created_at)
     ).all()
     return [webhook_json(row) for row in rows]
+
+
+@app.get("/v1/integrations/webhooks/deliveries")
+def list_webhook_deliveries(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(WebhookDelivery)
+        .where(WebhookDelivery.tenant_id == principal.tenant_id)
+        .order_by(WebhookDelivery.next_attempt_at.desc())
+        .limit(100)
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "event_id": row.event_id,
+            "subscription_id": row.subscription_id,
+            "status": row.status,
+            "attempt_count": row.attempt_count,
+            "last_attempt_at": row.last_attempt_at,
+            "delivered_at": row.delivered_at,
+            "response_status": row.response_status,
+            "last_error": row.last_error,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/v1/settings")
+def settings_summary(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    tenant = session.get(Tenant, principal.tenant_id)
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "tenant not found")
+    users = session.scalars(
+        select(User).where(User.tenant_id == principal.tenant_id).order_by(User.email)
+    ).all()
+    settings = get_settings()
+    return {
+        "tenant": {"id": tenant.id, "name": tenant.name},
+        "users": [_user_json(row) for row in users],
+        "environment": settings.environment,
+        "development_login_enabled": settings.development_login_enabled,
+        "low_disk_threshold_percent": settings.low_disk_threshold_percent,
+        "allowed_services": sorted(settings.allowed_services),
+        "supported_events": [item.value for item in EventType],
+    }
 
 
 @app.delete("/v1/integrations/webhooks/{subscription_id}", status_code=204)
@@ -768,6 +1248,51 @@ def tenant_row(session: Session, model: Any, row_id: str, tenant_id: str) -> Any
     return row
 
 
+def _audit_for(
+    session: Session, tenant_id: str, correlation_ids: set[str], limit: int = 50
+) -> list[dict[str, Any]]:
+    if not correlation_ids:
+        return []
+    rows = session.scalars(
+        select(AuditEventRow)
+        .where(
+            AuditEventRow.tenant_id == tenant_id,
+            AuditEventRow.correlation_id.in_(correlation_ids),
+        )
+        .order_by(AuditEventRow.sequence.desc())
+        .limit(limit)
+    ).all()
+    return [_audit_json(row) for row in rows]
+
+
+def _audit_json(row: AuditEventRow) -> dict[str, Any]:
+    return {
+        "sequence": row.sequence,
+        "occurred_at": row.occurred_at,
+        "correlation_id": row.correlation_id,
+        "event_type": row.event_type,
+        "actor_id": row.actor_id,
+        "details": row.details,
+        "previous_hash": row.previous_hash,
+        "event_hash": row.event_hash,
+    }
+
+
+def _count(session: Session, model: Any, tenant_id: str, condition: Any) -> int:
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(model)
+            .where(model.tenant_id == tenant_id, condition)
+        )
+        or 0
+    )
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
 def _claim_token(action_id: str, attempt: int, idempotency_key: str) -> str:
     message = f"{action_id}:{attempt}:{idempotency_key}".encode()
     return hmac.new(
@@ -776,6 +1301,10 @@ def _claim_token(action_id: str, attempt: int, idempotency_key: str) -> str:
 
 
 def device_json(row: Device) -> dict[str, Any]:
+    online = bool(
+        row.last_seen_at
+        and _aware(row.last_seen_at) >= datetime.now(UTC) - timedelta(minutes=5)
+    )
     return {
         "id": row.id,
         "external_id": row.external_id,
@@ -783,7 +1312,20 @@ def device_json(row: Device) -> dict[str, Any]:
         "os": row.os,
         "enrolled_at": row.enrolled_at.isoformat() if row.enrolled_at else None,
         "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+        "status": "online" if online else "offline",
+        "agent_status": "connected" if online else "disconnected",
     }
+
+
+def _device_summary(session: Session, row: Device, tenant_id: str) -> dict[str, Any]:
+    result = device_json(row)
+    result["open_incidents"] = _count(
+        session,
+        Incident,
+        tenant_id,
+        (Incident.device_id == row.id) & Incident.status.in_(["open", "investigating"]),
+    )
+    return result
 
 
 def action_json(row: Action) -> dict[str, Any]:
@@ -792,10 +1334,17 @@ def action_json(row: Action) -> dict[str, Any]:
         "device_id": row.device_id,
         "ticket_id": row.ticket_id,
         "skill_id": row.skill_id,
+        "parameters": row.parameters,
+        "device_os": row.device_os,
         "risk": row.risk,
         "status": row.status,
         "requested_by": row.requested_by,
         "approved_by": row.approved_by,
+        "attempt": row.attempt,
+        "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+        "lease_expires_at": (
+            row.lease_expires_at.isoformat() if row.lease_expires_at else None
+        ),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -823,4 +1372,14 @@ def webhook_json(row: WebhookSubscription) -> dict[str, Any]:
         "event_types": row.event_types,
         "active": row.active,
         "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def _user_json(row: User) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "tenant_id": row.tenant_id,
+        "email": row.email,
+        "role": row.role,
+        "active": row.active,
     }

@@ -9,7 +9,16 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal
-from .db_models import Action, Device, DeviceInventory, Tenant, Ticket, User
+from .db_models import (
+    Action,
+    Device,
+    DeviceInventory,
+    Heartbeat,
+    Incident,
+    Tenant,
+    Ticket,
+    User,
+)
 from .incidents import detect_inventory_incidents
 from .persistence import SqlAuditLog
 
@@ -40,6 +49,9 @@ def seed() -> None:
                 user = User(tenant_id=tenant.id, email=email, role=role, active=True)
                 session.add(user)
                 session.flush()
+            else:
+                user.role = role
+                user.active = True
             users[role] = user
         now = datetime.now(UTC)
         device_specs = (
@@ -67,24 +79,60 @@ def seed() -> None:
                 )
                 session.add(device)
                 session.flush()
-            devices[hostname] = device
-        web = devices["web-prod-01"]
-        existing_inventory = session.scalar(
-            select(DeviceInventory).where(DeviceInventory.device_id == web.id)
-        )
-        if existing_inventory is None:
-            payload = _inventory_payload(91.0)
-            session.add(
-                DeviceInventory(
+                SqlAuditLog(session).append(
                     tenant_id=tenant.id,
-                    device_id=web.id,
-                    collected_at=now,
-                    payload=payload,
+                    correlation_id=device.id,
+                    event_type="device.enrolled",
+                    actor_id=users["admin"].id,
+                    details={"hostname": hostname, "os": os_name, "demo": True},
                 )
-            )
-            detect_inventory_incidents(
-                session, tenant.id, web.id, payload, now, settings
-            )
+            else:
+                device.last_seen_at = last_seen
+            devices[hostname] = device
+        for hostname, device in devices.items():
+            if (
+                session.scalar(
+                    select(Heartbeat).where(Heartbeat.device_id == device.id)
+                )
+                is None
+            ):
+                session.add(
+                    Heartbeat(
+                        tenant_id=tenant.id,
+                        device_id=device.id,
+                        received_at=device.last_seen_at,
+                        status={
+                            "agent_version": "0.1.0-demo",
+                            "health": "offline"
+                            if hostname == "employee-laptop-01"
+                            else "healthy",
+                        },
+                    )
+                )
+            if (
+                session.scalar(
+                    select(DeviceInventory).where(
+                        DeviceInventory.device_id == device.id
+                    )
+                )
+                is None
+            ):
+                payload = _inventory_payload(
+                    hostname,
+                    91.0 if hostname == "web-prod-01" else 43.0,
+                )
+                session.add(
+                    DeviceInventory(
+                        tenant_id=tenant.id,
+                        device_id=device.id,
+                        collected_at=now,
+                        payload=payload,
+                    )
+                )
+                detect_inventory_incidents(
+                    session, tenant.id, device.id, payload, now, settings
+                )
+        web = devices["web-prod-01"]
         if (
             session.scalar(
                 select(Ticket).where(
@@ -105,22 +153,25 @@ def seed() -> None:
                     created_by=users["operator"].id,
                 )
             )
-        if (
-            session.scalar(
-                select(Action).where(
-                    Action.tenant_id == tenant.id, Action.device_id == web.id
-                )
+        low_disk_incident = session.scalar(
+            select(Incident).where(
+                Incident.tenant_id == tenant.id,
+                Incident.device_id == web.id,
+                Incident.incident_type == "low_disk_space",
             )
-            is None
-        ):
+        )
+        action = session.scalar(
+            select(Action).where(Action.id == "11111111-1111-4111-8111-111111111111")
+        )
+        if action is None:
             action = Action(
                 id="11111111-1111-4111-8111-111111111111",
                 tenant_id=tenant.id,
                 device_id=web.id,
-                ticket_id=None,
+                ticket_id=low_disk_incident.ticket_id if low_disk_incident else None,
                 skill_id="service.restart",
                 requested_by=users["operator"].id,
-                parameters={"service": "nginx"},
+                parameters={"service": "helpdesk-demo.service"},
                 device_os="linux",
                 risk="medium",
                 status="pending_approval",
@@ -139,14 +190,16 @@ def seed() -> None:
                     "risk": action.risk,
                 },
             )
+        elif low_disk_incident:
+            action.ticket_id = low_disk_incident.ticket_id
         session.commit()
         print(f"Seeded development tenant {tenant.name} ({tenant.id})")
 
 
-def _inventory_payload(used_percent: float) -> dict[str, object]:
+def _inventory_payload(hostname: str, used_percent: float) -> dict[str, object]:
     total = 100 * 1024**3
     return {
-        "hostname": "web-prod-01",
+        "hostname": hostname,
         "cpu": {"logical_cpus": 4, "utilization_percent": 24.5},
         "memory": {"total_bytes": 8 * 1024**3, "available_bytes": 3 * 1024**3},
         "filesystems": [

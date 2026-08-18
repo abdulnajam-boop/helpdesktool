@@ -1,5 +1,11 @@
 # Repository audit (2026-08-15)
 
+> Historical note: this document records the repository baseline and early control-plane
+> gap analysis. The current MVP now includes the React operator console, development
+> sessions, deterministic incident engine, low-disk correlation/recovery workflow,
+> additive incident migration, Compose seed/startup path, and CI. See `README.md` and
+> `docs/MVP_TESTING.md` for the current runnable product and remaining limitations.
+
 ## Method and baseline
 
 The repository was inspected from the current `work` branch, including tracked files,
@@ -34,8 +40,6 @@ in-memory adapters are testable reference implementations, not production storag
 
 - The original reference adapters remain process-local, while the control plane now
   persists state and uses database transactions, idempotency keys, leases, and an outbox.
-- State is process-local and does not survive restart; concurrent distributed workers
-  require database transactions, idempotency keys, leases, and an outbox.
 - The device OS context passed at submission is temporary. The control plane must
   resolve authoritative, signed inventory server-side.
 - Authentication, authorization roles, approval expiry/quorum, artifact signing,

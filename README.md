@@ -1,115 +1,134 @@
 # Helpdesktool
 
-Autonomous, safety-first AI IT help desk platform.
+Helpdesktool is a deterministic, safety-first IT operations SaaS MVP. It combines a FastAPI/PostgreSQL control plane, an unprivileged Linux endpoint agent, and a React operator console.
 
-Canonical repository: [abdulnajam-boop/helpdesktool](https://github.com/abdulnajam-boop/helpdesktool)
+The executable trust boundary is:
 
-## Mission
+```text
+Observe -> Detect -> Correlate -> Ticket -> Structured action proposal
+-> Policy -> Independent approval when required -> Device-bound job
+-> Authenticated allowlisted agent executor -> Verify -> Roll back/escalate
+-> Audit and domain events
+```
 
-Helpdesktool is designed to monitor endpoints, diagnose common IT problems, select controlled remediation skills, verify outcomes, roll back failed changes, and maintain a complete audit trail with minimal human intervention.
+The product is **not** a remote shell. Neither browser input nor future AI output can become an arbitrary shell or PowerShell command. The control plane queues structured work; only an authenticated endpoint agent can execute a locally allowlisted deterministic skill.
 
-## Core execution model
+## What the MVP includes
 
-`Observe -> Diagnose -> Plan -> Risk Check -> Approve (when required) -> Execute -> Verify -> Rollback (if needed) -> Document -> Learn`
+- Multi-tenant tenants, users, roles, devices, inventory, heartbeats, tickets, incidents, actions, approvals, execution results, audit events, and webhook integrations.
+- Development-only browser sessions for Owner, Admin, Operator, and Viewer demo users. Non-development environments fail closed if development authentication is enabled.
+- Dashboard and searchable browser pages for Devices, Tickets, Incidents, Actions, Approvals, Audit, Integrations, and Settings.
+- Deterministic low-disk detection, correlation, automatic ticket creation, recovery detection, incident reopening, and domain events.
+- A browser-accessible low-disk simulator which writes structured development telemetry without filling a real disk.
+- Risk-based policy and separation-of-duties approval before mutating endpoint work is queued.
+- Device-bound job leases, claim-token validation, idempotent reporting, verification and rollback outcomes.
+- Hash-chained tenant audit history and a transactional signed-webhook outbox.
+- An unprivileged Linux agent with inventory collectors and one allowlisted `service.restart` executor using fixed `systemctl` argument vectors and no shell.
 
-The LLM is a planner and skill selector. Privileged actions are performed only by deterministic, policy-controlled executors. Arbitrary unrestricted shell execution is not part of the architecture.
+## Architecture
 
-## Initial architecture
+```text
+React/Vite operator console (:3000)
+              |
+              v
+FastAPI control plane (:8000) ----> PostgreSQL
+  |       |       |                      |
+  |       |       +--> audit + events --> webhook outbox worker
+  |       +----------> incident correlation + tickets
+  +------------------> policy + approvals + persistent jobs
+                                      |
+                                      v
+                         authenticated Linux agent
+                                      |
+                                      v
+                    allowlisted deterministic executor
+```
 
-- `skills/` — versioned machine-readable skill contracts
-- `policies/` — risk, approval, and execution rules
-- `orchestrator/` — AI orchestration contract and prompts
-- `agent/` — endpoint agent design and OS executors
-- `tests/` — contract, policy, and executor tests
-- `docs/` — architecture and threat-model documentation
+Core backend modules live in `helpdesktool/`, the agent in `linux_agent/`, the browser application in `frontend/`, and additive Alembic migrations in `migrations/versions/`.
 
-## v1 goals
+## Quick start: one command
 
-1. Establish a safe skill contract.
-2. Implement read-only diagnostic skills first.
-3. Add low-risk remediations with verification and rollback.
-4. Introduce approval gates for medium/high-risk operations.
-5. Build immutable-style audit events for every decision and action.
-6. Support Windows first, followed by Linux and macOS parity.
-
-## Security principles
-
-- Least privilege
-- Default deny
-- Explicit skill allowlists
-- No arbitrary LLM-generated privileged commands
-- Input validation
-- Command timeouts and output limits
-- Approval gates based on risk
-- Verification after every mutation
-- Rollback where technically possible
-- Complete audit trail
-- Secrets never written to prompts or logs
-
-## Status
-
-The runnable FastAPI control plane persists tenants, users, devices, telemetry, tickets,
-actions, approvals, results, idempotency records, and hash-chained audit events in
-PostgreSQL. It reuses the default-deny policy and orchestration state machine. Approved
-jobs are queued only; the control plane deliberately cannot execute OS commands.
-The Linux agent v0.1 enrolls, reports health/inventory, polls device-bound jobs, and
-executes only the allowlisted deterministic `service.restart` skill.
-The safety orchestration foundation now includes typed skill/action contracts, a
-default-deny policy engine, independent approvals, verification/rollback transitions,
-tenant-scoped action access, and a hash-chained audit reference adapter.
-
-See the [repository audit](docs/REPOSITORY_AUDIT.md), [production architecture](docs/ARCHITECTURE.md),
-and [prioritized implementation plan](docs/IMPLEMENTATION_PLAN.md). Current persistence
-and executors are intentionally interfaces/reference adapters; they are not yet a
-deployable endpoint management product.
-
-## Development
-
-### Docker Compose (recommended)
+Requirements: Docker Engine with the Compose plugin.
 
 ```bash
 cp .env.example .env
-# Replace every placeholder secret in .env, then:
-docker compose up --build
-curl http://localhost:8000/health/ready
 ```
 
-Migrations run as a one-shot Compose service before the API starts. Interactive API
-documentation is available at `http://localhost:8000/docs`.
-
-### Bootstrap workflow
-
-1. `POST /v1/tenants` with `X-Bootstrap-Token` creates a tenant and owner.
-2. Use returned IDs as `X-Tenant-ID` and `X-User-ID` to enroll a device.
-3. Store the returned agent token once; only its SHA-256 digest is persisted.
-4. The agent uses `Authorization: Bearer <token>` plus a unique `Idempotency-Key` for
-   heartbeat and inventory requests.
-5. Users create tickets/actions. Medium/high risk actions require a different owner or
-   admin to call the decision endpoint. All allowed actions remain queued for a future
-   signed endpoint-agent job protocol.
-
-### Local development
-
-Requires Python 3.11+ and PostgreSQL. Install `.[dev]`, configure `.env`, run
-`alembic upgrade head`, then `uvicorn helpdesktool.api:app --reload`.
+Replace every `replace-with-...` value in `.env`, then run:
 
 ```bash
-pytest
-ruff check .
-ruff format --check .
-mypy
+docker compose up --build
 ```
 
-`X-Tenant-ID` and `X-User-ID` are development scaffolding, not authentication. The
-application refuses to start outside `development` while
-`HELPDESK_ALLOW_INSECURE_HEADER_AUTH=true`. Do not expose development mode publicly.
-See [the stabilization audit](docs/STABILIZATION_AUDIT.md) for schema and security status.
+Compose starts PostgreSQL, applies all migrations, idempotently seeds the Acme demo tenant, starts the API and webhook worker, then starts the frontend after the API health check passes. The named PostgreSQL volume preserves development data across `docker compose down` and restarts.
 
-## Linux agent v0.1
+Open:
 
-The agent runs as the current unprivileged user. Copy `agent.example.json` to
-`~/.config/helpdesktool/agent.json`, insert the tenant and owner IDs returned by tenant
-bootstrap, and set the same service allowlist in both `.env` and agent configuration.
+- Operator console: <http://localhost:3000>
+- API: <http://localhost:8000>
+- OpenAPI documentation: <http://localhost:8000/docs>
+- Liveness: <http://localhost:8000/health/live>
+- Database readiness: <http://localhost:8000/health/ready>
+
+Select `admin@acme.local` on the development login page.
+
+### Seeded development data
+
+`helpdesk-seed` is development-only and safe to run repeatedly. It creates or reconciles:
+
+- Tenant: **Acme IT**
+- Users: `owner@acme.local`, `admin@acme.local`, `operator@acme.local`, and `viewer@acme.local`
+- Devices: `web-prod-01`, `db-prod-01`, and `employee-laptop-01`
+- Realistic heartbeats and inventories
+- A correlated low-disk incident and linked ticket on `web-prod-01`
+- A database-backup ticket
+- A pending, ticket-linked controlled action requested by the Operator
+- Device, incident, ticket, approval, audit, and domain-event history
+
+## First browser test
+
+1. Log in as `admin@acme.local`.
+2. Confirm the Dashboard shows three devices and a pending approval.
+3. Open **Devices -> web-prod-01**.
+4. In **Simulated disk use**, submit `96`. The existing low-disk incident is correlated and its occurrence count increases.
+5. Submit `40`. Recovery telemetry resolves the incident and linked ticket.
+6. Submit `96` again. The same incident reopens rather than creating an unlimited duplicate.
+7. Open **Approvals**, inspect the allowlisted skill parameters, and approve or deny the seeded request.
+8. Inspect the linked Action and Audit timeline. Approval only queues work; it does not execute an OS command in the browser or control plane.
+
+The complete browser and live-agent checklist is in [docs/MVP_TESTING.md](docs/MVP_TESTING.md).
+
+## Role behavior
+
+- **Owner:** tenant administration and all operational capabilities.
+- **Admin:** device, ticket, action, approval, and integration management.
+- **Operator:** ticket/action operations and development telemetry simulation; cannot approve risky work.
+- **Viewer:** tenant-scoped read-only access.
+
+The UI removes controls that do not apply to the current role, but FastAPI authorization remains authoritative and returns `403` for prohibited writes.
+
+## Local development without Compose
+
+Requires Python 3.11+, PostgreSQL, and Node.js 22+.
+
+```bash
+python -m pip install -e ".[dev]"
+alembic upgrade head
+helpdesk-seed
+uvicorn helpdesktool.api:app --reload
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## Linux agent
+
+Copy `agent.example.json` to `~/.config/helpdesktool/agent.json`, insert a tenant/user identity for enrollment, and keep the same narrow service allowlist in the server and agent configuration.
 
 ```bash
 python -m pip install -e .
@@ -119,52 +138,51 @@ chmod 600 ~/.config/helpdesktool/agent.json
 helpdesk-linux-agent --config ~/.config/helpdesktool/agent.json --once
 ```
 
-For continuous operation, install `deploy/helpdesk-linux-agent.service` as a systemd
-**user** unit. Restart permission is not granted automatically: configure a narrow
-PolicyKit rule for only the allowlisted demo unit. Never run the agent as root merely
-to make remediation work.
+The agent stores its one-time credential with owner-only permissions, sends heartbeat/inventory, claims only jobs addressed to its device, validates leases and exact parameters, invokes `systemctl` without a shell, verifies the outcome, attempts rollback when necessary, and posts a structured result. Do not run it as root merely to make remediation work; use a narrow PolicyKit rule for only the test service.
 
-### End-to-end demonstration
+## Integrations
 
-1. Start Compose and bootstrap a tenant using `POST /v1/tenants`.
-2. Put the returned tenant/user IDs in the agent config and run the agent once. It
-   enrolls, saves its one-time credential with mode `0600`, sends a heartbeat and full
-   Linux inventory, then polls for work.
-3. Create a ticket and a `service.restart` action whose parameters are
-   `{"service":"helpdesk-demo.service"}` and include a unique `Idempotency-Key`.
-4. A *different* owner/admin approves it through
-   `POST /v1/actions/{id}/decision`. The action becomes `queued`.
-5. Run the agent again. It claims the device-bound lease, checks the local allowlist and
-   unit state, calls `systemctl restart` without a shell, verifies `active/running`, and
-   reports a structured result. Query `GET /v1/actions/{id}` and `GET /v1/audit` to see
-   the final status and complete transition history.
+Generic webhook subscriptions are external consumers only. n8n, Slack, Teams, and ticketing systems cannot approve endpoint work, bypass policy, or enter the execution trust boundary.
 
-## External integrations and n8n
+Webhook signing secrets are environment references such as `env:HELPDESK_WEBHOOK_SECRET_N8N`; secret values are not stored in subscription rows or returned to the frontend. Deliveries carry `X-Helpdesk-Event-ID` and an `X-Helpdesk-Signature-256` HMAC header. HTTPS public destinations are required by default, and the worker uses bounded timeouts, retry backoff, and dead-letter state.
 
-Helpdesk now publishes versioned domain events transactionally with state/audit changes.
-Tenant administrators can register generic webhook subscriptions through
-`POST /v1/integrations/webhooks`. n8n is only an external consumer: it cannot approve,
-authorize, execute, or change remediation policy.
-
-Webhook signing secrets are referenced as environment variables and are never stored in
-the database. For example, configure `HELPDESK_WEBHOOK_SECRET_N8N`, then register
-`env:HELPDESK_WEBHOOK_SECRET_N8N` as `secret_ref`. Deliveries include:
-
-```text
-X-Helpdesk-Event-ID: <uuid>
-X-Helpdesk-Signature-256: sha256=<HMAC-SHA256 of exact request body>
-```
-
-Consumers must verify the signature before parsing or acting on a payload. HTTPS and
-publicly routable destinations are required by default. The separate Compose worker
-uses bounded timeouts, exponential retries, dead-letter state, and no inbound API
-credentials. Local HTTP delivery can be enabled only with
-`HELPDESK_WEBHOOK_ALLOW_HTTP=true`; this does not disable private-address rejection.
-
-See [the external project evaluation](docs/OPEN_SOURCE_EVALUATION.md) for the explicit
-build/integrate/avoid decisions and licensing cautions.
-Requires Python 3.11 or newer. The foundation has no runtime third-party dependencies.
+## Validation
 
 ```bash
-python -m pytest
+python -m pip install -e ".[dev]"
+python -c "import helpdesktool; import linux_agent"
+python -m compileall helpdesktool linux_agent
+pytest
+ruff check .
+ruff format --check .
+mypy
+cd frontend && npm install && npm run build
+cd .. && docker compose config && docker compose build
 ```
+
+CI performs the backend and frontend checks from the repository manifests.
+
+## Shutdown and reset
+
+Preserve development data:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
+Destroy and recreate the demo database only when intentionally resetting QA:
+
+```bash
+docker compose down -v
+docker compose up --build
+```
+
+## Known limitations
+
+- Development HMAC sessions and optional identity headers are not production identity. Production OIDC/JWT is deferred, and both development mechanisms must be disabled outside local development.
+- Tenant filtering is enforced in application queries; PostgreSQL Row Level Security is not yet enabled.
+- Agent bearer credentials are long-lived and require rotation/mTLS hardening before production endpoint deployment.
+- The MVP detects and verifies low-disk recovery but does not ship an unsafe generic disk-cleanup command. A future cleanup skill must define exact safe targets, permission, verification, and rollback/escalation behavior.
+- `service.restart` is the only mutating reference executor. It is appropriate for exercising policy/approval/job/verification/rollback, not for claiming that restarting a service fixes disk usage.
+- Windows agent, production billing, OIDC, AI diagnosis, RAG, advanced ticketing integrations, and Kubernetes deployment are intentionally deferred.

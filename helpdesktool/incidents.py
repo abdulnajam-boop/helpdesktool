@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -35,9 +35,25 @@ def detect_inventory_incidents(
         if total <= 0 or free < 0 or free > total:
             continue
         used_percent = round((total - free) * 100 / total, 2)
-        if used_percent < settings.low_disk_threshold_percent:
-            continue
         mountpoint = str(filesystem.get("mountpoint", "unknown"))[:180]
+        if used_percent < settings.low_disk_threshold_percent:
+            resolve_recovered_incident(
+                session,
+                tenant_id=tenant_id,
+                device_id=device_id,
+                correlation_key=f"low_disk_space:{mountpoint}",
+                observed_at=observed_at,
+                evidence={
+                    "device_id": device_id,
+                    "filesystem": mountpoint,
+                    "used_percent": used_percent,
+                    "free_bytes": int(free),
+                    "total_bytes": int(total),
+                    "threshold_percent": settings.low_disk_threshold_percent,
+                    "observed_at": observed_at.isoformat(),
+                },
+            )
+            continue
         evidence = {
             "device_id": device_id,
             "filesystem": mountpoint,
@@ -64,6 +80,68 @@ def detect_inventory_incidents(
     return incidents
 
 
+def resolve_recovered_incident(
+    session: Session,
+    *,
+    tenant_id: str,
+    device_id: str,
+    correlation_key: str,
+    observed_at: datetime,
+    evidence: dict[str, Any],
+) -> Incident | None:
+    row = cast(
+        Incident | None,
+        session.scalar(
+            select(Incident)
+            .where(
+                Incident.tenant_id == tenant_id,
+                Incident.device_id == device_id,
+                Incident.correlation_key == correlation_key,
+                Incident.status.in_(["open", "investigating"]),
+            )
+            .order_by(Incident.last_observed_at.desc())
+        ),
+    )
+    if row is None:
+        return None
+    row.status = "resolved"
+    row.resolved_at = observed_at
+    row.last_observed_at = observed_at
+    row.evidence = evidence
+    if row.ticket_id:
+        ticket = session.scalar(
+            select(Ticket).where(
+                Ticket.id == row.ticket_id, Ticket.tenant_id == tenant_id
+            )
+        )
+        if ticket is not None:
+            ticket.status = "resolved"
+            SqlAuditLog(session).append(
+                tenant_id=tenant_id,
+                correlation_id=ticket.id,
+                event_type="ticket.resolved",
+                actor_id="system:detector",
+                details={
+                    "device_id": device_id,
+                    "incident_id": row.id,
+                    "reason": "linked incident recovered",
+                },
+            )
+    SqlAuditLog(session).append(
+        tenant_id=tenant_id,
+        correlation_id=row.id,
+        event_type="incident.resolved",
+        actor_id="system:detector",
+        details={
+            "device_id": device_id,
+            "ticket_id": row.ticket_id,
+            "reason": "filesystem utilization recovered below threshold",
+            "evidence": evidence,
+        },
+    )
+    return row
+
+
 def correlate_incident(
     session: Session,
     *,
@@ -78,16 +156,19 @@ def correlate_incident(
     correlation_hours: int,
 ) -> Incident:
     cutoff = observed_at - timedelta(hours=correlation_hours)
-    row = session.scalar(
-        select(Incident)
-        .where(
-            Incident.tenant_id == tenant_id,
-            Incident.device_id == device_id,
-            Incident.incident_type == incident_type,
-            Incident.correlation_key == correlation_key,
-            Incident.last_observed_at >= cutoff,
-        )
-        .order_by(Incident.last_observed_at.desc())
+    row = cast(
+        Incident | None,
+        session.scalar(
+            select(Incident)
+            .where(
+                Incident.tenant_id == tenant_id,
+                Incident.device_id == device_id,
+                Incident.incident_type == incident_type,
+                Incident.correlation_key == correlation_key,
+                Incident.last_observed_at >= cutoff,
+            )
+            .order_by(Incident.last_observed_at.desc())
+        ),
     )
     audit = SqlAuditLog(session)
     if row is not None:

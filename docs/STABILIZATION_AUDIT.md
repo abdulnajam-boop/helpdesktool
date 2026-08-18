@@ -12,8 +12,10 @@ the `dev` extra. No required tests use conditional dependency skips.
 Migration `0001` is a frozen baseline. Migration `0002` adds action claim token hash,
 claim/lease timestamps, attempt count, verification, and rollback outcome; matching ORM
 columns exist on `Action` and `ExecutionResultRow`. Migration `0003` adds domain events,
-webhook subscriptions and webhook deliveries; all three have matching ORM models. New
-schema changes must use additive migrations rather than editing an applied revision.
+webhook subscriptions and webhook deliveries; all three have matching ORM models.
+Migration `0004` adds the tenant-scoped incident lifecycle and correlation indexes;
+the ORM and schema-contract tests contain matching fields. New schema changes must use
+additive migrations rather than editing an applied revision.
 
 ## Canonical action flow
 

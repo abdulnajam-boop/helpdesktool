@@ -7,9 +7,10 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .config import get_settings
 from .database import get_session
 from .db_models import Device, User
-from .config import get_settings
+from .development_auth import InvalidDevelopmentSession, verify_session
 
 
 @dataclass(frozen=True)
@@ -20,15 +21,33 @@ class Principal:
 
 
 def require_user(
-    tenant_id: str = Header(alias="X-Tenant-ID"),
-    user_id: str = Header(alias="X-User-ID"),
+    tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    user_id: str | None = Header(default=None, alias="X-User-ID"),
+    authorization: str | None = Header(default=None),
     session: Session = Depends(get_session),
 ) -> Principal:
-    if not get_settings().allow_insecure_header_auth:
+    settings = get_settings()
+    if authorization and authorization.startswith("Bearer "):
+        if (
+            settings.environment != "development"
+            or not settings.development_login_enabled
+        ):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid browser session")
+        try:
+            claims = verify_session(
+                authorization[7:], settings.development_session_secret
+            )
+        except InvalidDevelopmentSession as exc:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+        tenant_id = str(claims["tenant"])
+        user_id = str(claims["sub"])
+    elif not settings.allow_insecure_header_auth:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "human authentication is not configured",
         )
+    elif not tenant_id or not user_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "authentication required")
     user = session.scalar(
         select(User).where(
             User.id == user_id, User.tenant_id == tenant_id, User.active.is_(True)

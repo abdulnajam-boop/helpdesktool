@@ -24,21 +24,22 @@ dev = ["httpx>=0.27,<1", "mypy>=1.13,<2", "pytest>=8,<10", "ruff>=0.8,<1"]
 [project.scripts]
 helpdesk-linux-agent = "linux_agent.agent:main"
 helpdesk-webhook-worker = "helpdesktool.webhook_worker:main"
+helpdesk-seed = "helpdesktool.seed:seed"
 
 [project.urls]
 Homepage = "https://github.com/abdulnajam-boop/helpdesktool"
 Repository = "https://github.com/abdulnajam-boop/helpdesktool.git"
 Issues = "https://github.com/abdulnajam-boop/helpdesktool/issues"
 
-[tool.setuptools]
-packages = ["helpdesktool", "linux_agent"]
-
 [tool.setuptools.packages.find]
-include = ["helpdesktool*"]
+include = ["helpdesktool*", "linux_agent*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.mypy]
 python_version = "3.11"

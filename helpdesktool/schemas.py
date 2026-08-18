@@ -26,6 +26,12 @@ class InventoryCreate(BaseModel):
     payload: dict[str, Any]
 
 
+class LowDiskSimulation(BaseModel):
+    device_id: str
+    mountpoint: str = Field(default="/", min_length=1, max_length=180)
+    used_percent: float = Field(ge=0, le=100)
+
+
 class TicketCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str = Field(default="", max_length=20_000)

@@ -112,6 +112,44 @@ class Ticket(Base):
     )
 
 
+class Incident(Base):
+    __tablename__ = "incidents"
+    __table_args__ = (
+        Index(
+            "ix_incidents_tenant_device_correlation",
+            "tenant_id",
+            "device_id",
+            "correlation_key",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), index=True
+    )
+    ticket_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tickets.id", ondelete="SET NULL"), index=True
+    )
+    incident_type: Mapped[str] = mapped_column(String(100), index=True)
+    severity: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    summary: Mapped[str] = mapped_column(String(300))
+    evidence: Mapped[dict] = mapped_column(JSON)
+    correlation_key: Mapped[str] = mapped_column(String(255))
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Action(Base):
     __tablename__ = "actions"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

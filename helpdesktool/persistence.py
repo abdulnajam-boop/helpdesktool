@@ -18,11 +18,6 @@ from .db_models import (
     WebhookSubscription,
 )
 from .events import AUDIT_EVENT_MAPPING, DomainEvent, EventType, sanitize_event_data
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from .audit import AuditEvent
-from .db_models import Action, AuditEventRow, ExecutionResultRow
 from .models import (
     ActionRecord,
     ActionRequest,
