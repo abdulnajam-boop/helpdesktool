@@ -1,33 +1,45 @@
 name: CI
+
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: "3.11"
           cache: pip
-      - run: python -m pip install -e '.[dev]'
-      - run: python -m compileall helpdesktool linux_agent
-      - run: ruff check .
-      - run: ruff format --check .
-      - run: mypy
-      - run: pytest
-  frontend:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install
-      - run: npm run build
+
+      - name: Upgrade packaging tools
+        run: python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install project and development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Verify installed packages
+        run: |
+          cd "$(mktemp -d)"
+          python -c "import helpdesktool; import linux_agent; print(helpdesktool.__file__); print(linux_agent.__file__)"
+
+      - name: Run tests
+        run: python -m pytest

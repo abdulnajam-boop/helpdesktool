@@ -54,6 +54,9 @@ PostgreSQL. It reuses the default-deny policy and orchestration state machine. A
 jobs are queued only; the control plane deliberately cannot execute OS commands.
 The Linux agent v0.1 enrolls, reports health/inventory, polls device-bound jobs, and
 executes only the allowlisted deterministic `service.restart` skill.
+The safety orchestration foundation now includes typed skill/action contracts, a
+default-deny policy engine, independent approvals, verification/rollback transitions,
+tenant-scoped action access, and a hash-chained audit reference adapter.
 
 See the [repository audit](docs/REPOSITORY_AUDIT.md), [production architecture](docs/ARCHITECTURE.md),
 and [prioritized implementation plan](docs/IMPLEMENTATION_PLAN.md). Current persistence
@@ -160,58 +163,8 @@ credentials. Local HTTP delivery can be enabled only with
 
 See [the external project evaluation](docs/OPEN_SOURCE_EVALUATION.md) for the explicit
 build/integrate/avoid decisions and licensing cautions.
-
-## Browser SaaS MVP
-
-Helpdesktool now includes a React operator console backed by the FastAPI control plane. The deterministic trust boundary remains unchanged: observations create incidents, policy evaluates structured actions, administrators approve when required, and only an authenticated endpoint agent can claim an allowlisted job. The browser and control plane never execute endpoint shell commands.
-
-### Quick start
-
-1. Copy the development configuration and replace every placeholder secret:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Start PostgreSQL, apply migrations, seed the Acme demo tenant, and launch the API, worker, and web console:
-
-   ```bash
-   docker compose up --build
-   ```
-
-3. Open <http://localhost:3000>. The API and interactive documentation are available at <http://localhost:8000> and <http://localhost:8000/docs>.
-4. Choose `admin@acme.local` on the development login screen. Demo login is only available when `HELPDESK_ENVIRONMENT=development` and `HELPDESK_DEVELOPMENT_LOGIN_ENABLED=true`; application startup fails closed if it is enabled in another environment.
-
-The idempotent `helpdesk-seed` command creates **Acme IT**, Owner/Admin/Operator/Viewer users, three representative devices, inventory, a correlated low-disk incident and ticket, a pending remediation approval, and audit history. It is safe to run repeatedly in development.
-
-### Local development without containers
+Requires Python 3.11 or newer. The foundation has no runtime third-party dependencies.
 
 ```bash
-python -m pip install -e ".[dev]"
-alembic upgrade head
-helpdesk-seed
-uvicorn helpdesktool.api:app --reload
-cd frontend && npm install && npm run dev
+python -m pytest
 ```
-
-Run backend and frontend verification with:
-
-```bash
-pytest
-ruff check .
-mypy
-cd frontend && npm run build
-```
-
-### Simulating low disk space
-
-Enroll or use an authenticated Linux device, then submit inventory containing a `filesystems` entry whose calculated usage exceeds `HELPDESK_LOW_DISK_THRESHOLD_PERCENT`. The control plane deterministically correlates by tenant, device, incident type, and mountpoint; creates one incident and linked ticket; increments the occurrence count for repeat observations inside the correlation window; emits domain events; and exposes the result in Dashboard and Incidents.
-
-See [docs/MVP_TESTING.md](docs/MVP_TESTING.md) for the complete browser and agent acceptance test.
-
-### Known MVP limitations
-
-- Development sessions are short-lived HMAC envelopes for local testing, not production identity. Production deployment requires OIDC/JWT and must disable development login and header authentication.
-- Tenant scoping is enforced in API queries, but PostgreSQL row-level security is not yet enabled.
-- The low-disk workflow detects, correlates, tickets, and audits. Automated cleanup remains intentionally absent until a dedicated allowlisted cleanup skill and verification contract are designed.
-- The demo agent credential is not displayed by the seed command. Enroll a test agent through the API for a live job-claim demonstration.

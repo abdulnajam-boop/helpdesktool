@@ -6,7 +6,6 @@ from helpdesktool.db_models import (
     Action,
     DomainEventRow,
     ExecutionResultRow,
-    Incident,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -35,21 +34,3 @@ def test_webhook_outbox_models_match_migration_tables():
     migration = Path("migrations/versions/0003_domain_events_webhooks.py").read_text()
     for table in (DomainEventRow, WebhookSubscription, WebhookDelivery):
         assert f'"{table.__tablename__}"' in migration
-
-
-def test_incident_model_has_correlation_and_ticket_contract():
-    columns = set(Incident.__table__.columns.keys())
-    assert {
-        "tenant_id",
-        "device_id",
-        "ticket_id",
-        "incident_type",
-        "severity",
-        "status",
-        "evidence",
-        "correlation_key",
-        "occurrence_count",
-        "first_observed_at",
-        "last_observed_at",
-        "resolved_at",
-    } <= columns

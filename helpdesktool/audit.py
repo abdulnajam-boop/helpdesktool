@@ -85,6 +85,7 @@ class InMemoryAuditLog:
                 previous_hash=previous_hash,
                 event_hash=digest,
             )
+            event = AuditEvent(**payload, event_hash=digest)
             self._events.append(event)
             return event
 
