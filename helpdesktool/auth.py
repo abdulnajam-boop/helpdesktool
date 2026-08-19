@@ -79,6 +79,24 @@ def resolving_identity(session: Session) -> Iterator[None]:
         set_rls_bypass(session, enabled=False)
 
 
+@contextmanager
+def aggregating_platform_metrics(session: Session) -> Iterator[None]:
+    """The third and only other legitimate use of the cross-tenant
+    ``rls_bypass`` GUC (see ``helpdesktool.rls``'s module docstring, kept in
+    sync with this): ``GET /metrics``'s Prometheus exporter (``metrics.py``)
+    computing platform-wide *aggregate counts* (how many actions are in each
+    status, how many devices are online, ...). This never returns or logs
+    row-level tenant data — only `COUNT(*) ... GROUP BY` aggregates a
+    Prometheus scraper is allowed to see — and, like ``resolving_identity``,
+    unconditionally revokes the bypass again before any other code runs.
+    """
+    set_rls_bypass(session, enabled=True)
+    try:
+        yield
+    finally:
+        set_rls_bypass(session, enabled=False)
+
+
 @lru_cache
 def get_oidc_verifier() -> OIDCVerifier:
     settings = get_settings()

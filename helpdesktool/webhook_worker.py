@@ -20,6 +20,8 @@ from .integrations import (
     canonical_payload,
     validate_webhook_url,
 )
+from .logging_config import configure_logging
+from .persistence import record_worker_heartbeat
 
 LOG = logging.getLogger("helpdesktool-webhook-worker")
 
@@ -128,14 +130,13 @@ class WebhookWorker:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    configure_logging()
     worker = WebhookWorker(SignedWebhookProvider(), get_settings())
     while True:
         try:
             with SessionLocal() as session:
                 processed = worker.process_batch(session)
+                record_worker_heartbeat(session, "webhook_worker", processed)
             if processed == 0:
                 time.sleep(2)
         except Exception:

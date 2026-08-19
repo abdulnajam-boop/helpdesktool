@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     oidc_jwks_url: str = ""
     lease_reaper_max_attempts: int = 3
     lease_reaper_poll_seconds: float = 15.0
+    # Empty by default: /metrics is unrestricted at the application layer,
+    # matching how Prometheus scraping is conventionally secured (network
+    # policy / reverse proxy, not an app-level secret). Set this to require
+    # `Authorization: Bearer <token>` on /metrics if that perimeter doesn't
+    # exist in a given deployment. Not enforced by validate_security() the
+    # way OIDC/job-signing/bootstrap secrets are -- an empty value here is a
+    # legitimate, common production configuration, not a mistake.
+    metrics_token: str = ""
     # All empty by default on purpose: the platform must fully function with
     # no AI provider configured at all (helpdesktool.ai falls back to a
     # deterministic, non-network summary — see ai_configured below and

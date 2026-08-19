@@ -63,6 +63,21 @@ class SkillManifestRow(Base):
     )
 
 
+class WorkerHeartbeatRow(Base):
+    """One row per background worker process (``webhook_worker``,
+    ``lease_reaper``), upserted at the end of every batch iteration.
+    Platform-wide/unscoped like ``tenants``/``skills`` — a worker's
+    liveness isn't owned by any tenant. Consumed by ``GET /metrics`` (a
+    stale heartbeat surfaces as a Prometheus gauge an alert rule can fire
+    on) and ``GET /v1/system/health`` for human/operator consumption.
+    """
+
+    __tablename__ = "worker_heartbeats"
+    worker_name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_batch_size: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("tenant_id", "email"),)

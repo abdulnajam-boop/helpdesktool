@@ -1138,6 +1138,89 @@ Linux agent — proven by tests, not just by symmetry with the Linux code.
 
 ### Milestone 6 — Observability, monitoring, and reporting
 
+> **Actual completion status (2026-08-20): PARTIAL.** The backend
+> observability core is done and tested: structured JSON logging with
+> per-request correlation ids, a Prometheus `/metrics` endpoint with both
+> real-time HTTP metrics and scrape-time business/domain gauges, and
+> background-worker liveness heartbeats. **Not done in this pass:**
+> OpenTelemetry tracing, the frontend Reporting page, and list-endpoint
+> pagination (Section 7's data-lifecycle work this milestone originally
+> bundled in) — see the reasoning for each below and revisit as a
+> follow-up rather than assuming this milestone is closed.
+>
+> **What was actually built:**
+> - `helpdesktool/logging_config.py`: every log line (API, webhook worker,
+>   lease reaper) is now single-line JSON — timestamp, level, logger,
+>   message, plus `request_id` whenever emitted inside a request.
+>   `configure_logging()` is called once at each process's startup.
+> - `RequestIdMiddleware` (`api.py`): generates or propagates
+>   `X-Request-ID`, binds it for the duration of the request (so every log
+>   line during that request carries it), echoes it back in the response
+>   header, and records the two HTTP Prometheus metrics below against the
+>   *matched route template* (`/v1/devices/{device_id}/jobs`, never the raw
+>   path with real ids in it, which would blow up label cardinality).
+> - `helpdesktool/metrics.py` / `GET /metrics`: `helpdesk_http_requests_total`
+>   and `helpdesk_http_request_duration_seconds` (real-time, incremented by
+>   the middleware) plus scrape-time gauges computed fresh from the database
+>   on every scrape rather than incremented at every call site throughout
+>   the codebase (deliberate — a scrape-time aggregate query can never drift
+>   from what's actually in the database the way manually-threaded counters
+>   can): `helpdesk_actions_total{status}`, `helpdesk_incidents_total{status}`,
+>   `helpdesk_devices_total{status}` (online/offline, same 5-minute threshold
+>   the dashboard already uses), `helpdesk_diagnoses_total{fallback_used}`,
+>   `helpdesk_webhook_deliveries_total{status}`, and
+>   `helpdesk_worker_heartbeat_age_seconds{worker}`. Optional
+>   `Settings.metrics_token` gates the endpoint with a bearer token (not
+>   enforced in production the way OIDC/job-signing secrets are — a metrics
+>   endpoint left open at the application layer behind a network-level
+>   perimeter is a legitimate, common production configuration, not a
+>   mistake, so this is a documented judgment call, not an oversight).
+> - New `worker_heartbeats` table (migration `0009`, platform-wide/unscoped
+>   like `tenants`/`skills`) — `webhook_worker.py` and `lease_reaper.py` both
+>   upsert their liveness after every loop iteration (via the new
+>   `persistence.record_worker_heartbeat`), whether or not that batch found
+>   anything to do, so "alive but idle" is distinguishable from "actually
+>   dead" in the `helpdesk_worker_heartbeat_age_seconds` gauge.
+> - `helpdesktool.auth.aggregating_platform_metrics`: a third, narrowly
+>   scoped, documented use of the cross-tenant `rls_bypass` GUC (alongside
+>   `webhook_worker` and `resolving_identity` — see `rls.py`'s updated module
+>   docstring), used only by the scrape-time aggregate `COUNT(*) ... GROUP
+>   BY` queries above. Never returns or logs row-level tenant data.
+> - `compose.yaml`: optional local Prometheus + Grafana
+>   (`docker compose --profile observability up`, not started by a plain
+>   `docker compose up`) — Grafana comes with Prometheus already wired as
+>   its default datasource (`deploy/grafana-datasource.yml`), scraping the
+>   API via `deploy/prometheus.yml`. Validated with
+>   `docker compose --profile observability config`.
+> - **OpenTelemetry evaluated, not built this pass** — same treatment as
+>   mTLS in Milestone 3: full tracing needs an actual OTLP collector target
+>   (a real infrastructure/vendor decision this pass didn't make
+>   unilaterally) plus several new dependencies
+>   (`opentelemetry-instrumentation-fastapi`/`-sqlalchemy`), and the
+>   correlation-id-threaded structured logs plus Prometheus metrics above
+>   already cover this MVP stage's practical operational-visibility need
+>   (which request touched which log lines; aggregate golden-signal
+>   metrics). Revisit if/when a specific collector target is chosen.
+> - **Frontend Reporting page and list-endpoint pagination not built this
+>   pass** — both are real, separately-scoped pieces of work (a
+>   dashboard-quality reporting UI, and consistent `limit`/`offset` or
+>   cursor pagination across `/v1/devices`, `/v1/tickets`, `/v1/actions`,
+>   `/v1/incidents`) that this milestone's original scope bundled in but
+>   this pass judged better done as their own dedicated milestones (P3/P5
+>   frontend work, P6 data-lifecycle work) rather than rushed as an add-on
+>   here.
+>
+> **Tests:** `tests/test_observability.py` (10 cases — JSON formatter output
+> shape, request-id binding, request-id generation/propagation through a
+> real request, `/metrics` exposes the expected series and reflects real
+> action/device counts computed from the database, token-gating behavior,
+> worker-heartbeat upsert and its reflection in the gauge). Full suite: all
+> passing (only the same 4 pre-existing Windows-platform-limited failures),
+> verified in a `python:3.13` Linux container against a real Postgres 17
+> container matching CI, including a from-scratch `alembic upgrade head`
+> run confirming `worker_heartbeats` has no RLS applied (platform-wide, by
+> design) and the restricted `helpdesk_app` role can read/write it.
+
 **Build:**
 - Structured JSON logging with request/correlation IDs across the API and
   webhook worker.
