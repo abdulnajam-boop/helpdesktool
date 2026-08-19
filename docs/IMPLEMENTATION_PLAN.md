@@ -842,6 +842,95 @@ adding a second skill requires a data change, not a synchronized code deploy.
 
 ### Milestone 5 — Windows endpoint agent
 
+> **Actual completion status (2026-08-19): DONE** (the originally-stated
+> dependency on Milestone 4's skill manifest format was not actually required —
+> the agent works against the existing hardcoded `service.restart` skill exactly
+> as the Linux agent does, and can adopt a versioned manifest later without
+> restructuring). Built and genuinely verified against a real Windows machine
+> with `pywin32`/`psutil` installed (not written blind): every collector
+> function (`cpu_inventory`, `memory_inventory`, `filesystem_inventory`,
+> `network_inventory` including real DNS-server registry reads,
+> `service_inventory`, `installed_applications` — 174 real installed apps
+> found, `pending_reboot`, `process_inventory`) was run directly against this
+> machine and produced correct real data; `Win32ServiceManager.query_state`
+> was run against real services (`Spooler`, `Dnscache`) and a nonexistent one,
+> confirmed correct in both cases. **A live start/stop/restart cycle against a
+> real Windows service was deliberately not performed** (would have required
+> either disrupting a real system service on the development machine without
+> being asked, or standing up a throwaway test service — judged not worth the
+> risk/complexity for this pass); the safety-critical allowlist/rollback/
+> verification *decision logic* is instead fully unit-tested via an injected
+> fake `ServiceManager`, exactly mirroring how the Linux executor's tests work,
+> and the real Win32 API call sequence was verified by direct code+type
+> inspection (`mypy --strict --platform win32`, clean) plus the successful
+> read-only calls above.
+>
+> **What was actually built** (mirrors `linux_agent/` file-for-file):
+> `windows_agent/config.py`, `client.py` (both essentially identical to their
+> Linux counterparts — genuinely OS-agnostic code, not reimplemented, just
+> duplicated per this project's existing per-OS-package convention rather than
+> introducing a new shared package); `collectors.py` (`psutil` for CPU/memory/
+> disk/network/processes — cross-platform on purpose, this is what makes the
+> module importable and testable on Linux CI; stdlib `winreg`, imported lazily
+> inside only the functions that need it, for DNS servers/installed apps/
+> pending-reboot registry reads — no `ipconfig`/`wmic`/PowerShell); `executor.py`
+> (pure allowlist/rollback/verification logic against a `ServiceManager`
+> Protocol, identical contract to the Linux executor); `win32_service_manager.py`
+> (the real, Windows-only `Win32ServiceManager` — direct Win32 API calls only,
+> confirmed genuinely safer than even a fixed subprocess argument vector since
+> no process is spawned for service control at all); `agent.py` (`WindowsAgent`,
+> the same enrollment/heartbeat/inventory/job-poll loop as `LinuxAgent`, with an
+> injectable `service_manager` for testability); `service.py` (a real Windows
+> Service via `win32serviceutil.ServiceFramework` — the SCM-integrated
+> equivalent of the Linux agent's systemd unit); `deploy/README-windows-agent.md`
+> (install/uninstall/credential-protection/failure-restart documentation,
+> mirroring the Linux deployment story).
+>
+> **Structural decision, load-bearing for CI:** pywin32 (`win32service`,
+> `pywintypes`, `winerror`, `servicemanager`, `win32serviceutil`, `win32event`)
+> and the stdlib-but-Windows-only `winreg` are *never* imported at module level
+> anywhere except `win32_service_manager.py` and `service.py` — everywhere else
+> they're imported lazily inside the one function/constructor that actually
+> needs them. This is what makes `windows_agent.executor`, `.collectors`,
+> `.config`, `.client`, and `.agent` importable and unit-testable on Linux CI
+> at all (`pywin32` cannot even be `pip install`ed on Linux — there are no
+> non-Windows wheels on PyPI). The new `windows` optional-dependency group
+> (`psutil` unconditional, `pywin32` gated behind a `sys_platform == "win32"`
+> marker so pip correctly skips it on Linux rather than failing the install)
+> makes this concrete; CI now installs `.[dev,windows]`.
+>
+> **Verification discipline carried over from earlier milestones — reproduced
+> CI's exact environment before pushing, not just trusted local results:**
+> installing `.[dev,windows]` and running the entire suite inside a real
+> `python:3.13` Linux container (matching CI's runner) against a real
+> ephemeral Postgres container produced **91 passed, 0 failed** — notably
+> including the 3 tests that fail on this Windows development machine
+> (`test_linux_agent`/`test_linux_collectors`'s POSIX-only tests), since a
+> real Linux container is exactly where they're supposed to pass; this was
+> the first time this session saw literally everything green in one run.
+>
+> **Tests added:** `tests/test_windows_executor.py` (7 tests — successful
+> restart+verify, non-allowlisted/malformed parameters rejected without any
+> manager calls, uninstalled service fails without attempting restart, restart
+> failure triggers rollback and correctly reports if restore also failed,
+> post-restart verification failure rolls back to the prior state, rollback
+> from a *stopped* before-state calls `stop()` not `start()`, construction
+> validation) and `tests/test_windows_agent.py` (4 tests — misaddressed/
+> unsupported-skill/expired-lease job rejection identical to the Linux agent's
+> coverage, successful execution, remediation disabled when no allowlist is
+> configured, config round-trip).
+>
+> **Not done / explicitly deferred:** collector *structural* tests (asserting
+> the shape of `collect_inventory()`'s output, the way
+> `test_linux_collectors.py` does) were not added as a separate test file —
+> the collectors were instead verified by direct, real execution against this
+> machine during development (documented above), which is stronger evidence
+> than a structural assertion would be, but leaves no permanent regression
+> test for the collector *shapes*; a live Win32 start/stop/restart integration
+> test (see above); actual installation/registration of the Windows Service on
+> any machine (`service.py` was verified to import and construct correctly,
+> not run as a live installed service).
+
 **Build:**
 - A new `windows_agent/` package mirroring `linux_agent/`'s architecture:
   enrollment/config, HTTP client (reuse the same control-plane contract),
