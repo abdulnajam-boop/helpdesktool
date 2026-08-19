@@ -1,6 +1,9 @@
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+from .rls import APP_ROLE
 
 
 class Settings(BaseSettings):
@@ -9,6 +12,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql+psycopg://helpdesk:helpdesk@localhost:5432/helpdesk"
+    app_role_password: str = "change-me-before-use"
     bootstrap_token: str = "change-me-before-use"
     job_claim_secret: str = "change-me-before-use"
     environment: str = "development"
@@ -23,6 +27,9 @@ class Settings(BaseSettings):
     webhook_allow_http: bool = False
     webhook_timeout_seconds: float = 10.0
     webhook_max_attempts: int = 8
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
 
     @property
     def allowed_services(self) -> frozenset[str]:
@@ -34,6 +41,31 @@ class Settings(BaseSettings):
     def allowed_cors_origins(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
+    @property
+    def oidc_configured(self) -> bool:
+        return bool(self.oidc_issuer and self.oidc_audience and self.oidc_jwks_url)
+
+    @property
+    def runtime_database_url(self) -> str:
+        """The connection the API and webhook worker use at runtime.
+
+        This is deliberately *not* ``database_url`` for a PostgreSQL target:
+        that URL's role is the schema owner, which PostgreSQL always exempts
+        from row-level security (see ``helpdesktool.rls``). The application
+        must connect as the restricted, non-superuser ``helpdesk_app`` role —
+        migration 0005 creates it with this same ``app_role_password`` — so
+        that RLS policies are actually enforced against live request
+        traffic. For any non-PostgreSQL URL (e.g. SQLite in tests), this is
+        just ``database_url`` unchanged, since RLS/role separation is a
+        PostgreSQL-only concept.
+        """
+        url = make_url(self.database_url)
+        if url.get_backend_name() != "postgresql":
+            return self.database_url
+        return url.set(
+            username=APP_ROLE, password=self.app_role_password
+        ).render_as_string(hide_password=False)
+
     def validate_security(self) -> None:
         if self.environment != "development" and self.allow_insecure_header_auth:
             raise RuntimeError(
@@ -41,13 +73,20 @@ class Settings(BaseSettings):
             )
         if self.environment != "development" and self.development_login_enabled:
             raise RuntimeError("development browser login is development-only")
+        if self.environment != "development" and not self.oidc_configured:
+            raise RuntimeError(
+                "OIDC issuer, audience, and JWKS URL must all be configured "
+                "outside development — there is no other way to authenticate "
+                "a human user in this environment"
+            )
         if self.environment != "development" and "change-me-before-use" in {
             self.bootstrap_token,
             self.job_claim_secret,
             self.development_session_secret,
+            self.app_role_password,
         }:
             raise RuntimeError(
-                "bootstrap, session and job claim secrets must be changed"
+                "bootstrap, session, job claim, and app role secrets must be changed"
             )
 
 

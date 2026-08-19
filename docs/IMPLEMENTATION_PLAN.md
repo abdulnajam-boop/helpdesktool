@@ -438,6 +438,15 @@ verified by an actual green CI run, not just local execution.
 
 ### Milestone 2 — Production identity and database-enforced tenant isolation
 
+> **Actual completion status (2026-08-19): DONE, locally verified against real
+> PostgreSQL.** Every DoD item met. See the verification block at the end of this
+> section for exact results and the real bugs found (and fixed) along the way —
+> several of which only surfaced by actually running the tests against real
+> PostgreSQL rather than reasoning about the design on paper. Not yet pushed to
+> GitHub or merged to `main` — that step, and confirming a real GitHub Actions
+> run, is still pending as of this writing (see the report given to the user for
+> current status).
+
 **Build:**
 - Real OIDC/JWT verification (issuer, audience, algorithm, expiry, signing-key
   rotation via JWKS) as the production auth path in `auth.py`, replacing the
@@ -465,6 +474,184 @@ never see each other's rows).
 **Definition of done:** no client-supplied tenant/user identity is trusted outside
 development mode; every tenant-scoped table has an enforced RLS policy; the
 negative-isolation test suite passes and is part of CI.
+
+**What was actually built:**
+
+- `helpdesktool/oidc.py` (new): provider-neutral `OIDCVerifier` — verifies JWT
+  signature, issuer, audience, expiry via a pluggable `SigningKeyResolver`
+  (production: `PyJWKClient` fetching a real provider's JWKS; tests: an
+  injected static key, no network). Works with any standards-compliant OIDC
+  provider (Auth0, Okta, Keycloak, Cognito, a self-hosted one, ...) — nothing
+  provider-specific anywhere in this module.
+- `helpdesktool/auth.py` (rewritten): `require_user` now has a real production
+  path — a `Bearer` token outside development mode is verified via OIDC, not
+  flatly rejected as before. Tenant is resolved from the token's
+  cryptographically verified `email` claim against `users` (never from a raw
+  client header); an `X-Tenant-ID` header is read only to disambiguate when one
+  verified email is provisioned into more than one tenant, filtered against a
+  server-computed candidate set, never used as a raw lookup key. Every
+  resolution path (dev session, insecure header, OIDC, agent) now also binds
+  the request's DB session to that tenant via `set_tenant_context` for RLS.
+- `helpdesktool/rls.py` (new) + `migrations/versions/0005_row_level_security.py`:
+  `ENABLE`+`FORCE ROW LEVEL SECURITY` and one `tenant_isolation` policy per
+  tenant-scoped table (14 tables), keyed on a `app.current_tenant_id` session
+  GUC with a narrow, documented `app.rls_bypass` escape hatch for the two
+  processes that legitimately need cross-tenant access (see findings below).
+  The same migration also provisions a **second PostgreSQL role**
+  (`helpdesk_app`, `NOSUPERUSER NOBYPASSRLS`) — required because PostgreSQL
+  superusers (which the Compose setup's single configured user is) always
+  bypass RLS regardless of `FORCE`; without this second role the policies
+  would be enforced against nobody. `helpdesktool/config.py`'s
+  `Settings.runtime_database_url` derives this role's connection URL
+  automatically from `database_url` + a new `app_role_password` setting;
+  `helpdesktool/database.py`'s module-level engine (used by the API and, via
+  the same `SessionLocal`, the webhook worker and seed script) connects as
+  this restricted role. Migrations continue to run as the original owning
+  role. `validate_security()` now also requires OIDC to be fully configured
+  and `app_role_password` to be non-default outside development.
+- `helpdesktool/database.py`: `set_tenant_context`/`set_rls_bypass` (session
+  GUC setters, PostgreSQL-only, no-ops elsewhere) and `get_session`'s teardown
+  now unconditionally resets both GUCs before a connection returns to the
+  pool — see "bugs found" below for why this specific detail matters.
+
+**Bugs found by actually testing this against real PostgreSQL (not by design
+review alone) — each is exactly the kind of thing "test with real PostgreSQL,
+not SQLite-only behavior" was meant to catch:**
+
+1. **The first working version of this design enforced nothing at all.**
+   Tests initially ran as the Postgres superuser (the only role Docker
+   Compose's setup provides) — PostgreSQL exempts superusers from RLS
+   unconditionally, so every policy passed and every isolation test looked
+   green for the wrong reason. This is why the `helpdesk_app` role above
+   exists; without it, this milestone would have shipped RLS that looks
+   correct in the migration and does nothing in production.
+2. **Identity resolution vs. default-deny is a chicken-and-egg problem.**
+   Looking up "which tenant does this credential belong to" is, by
+   definition, a query that has to run before any tenant context exists —
+   but default-deny RLS blocks an unscoped query regardless of what its own
+   `WHERE` clause says. This affected all three identity-resolution lookups
+   (`_load_principal`, `_resolve_oidc_principal`, `require_agent`'s device
+   lookup) and was invisible until the API-level tests exercised real
+   cross-tenant scenarios. Fixed with `auth.resolving_identity`, a context
+   manager that grants cross-tenant visibility only for that one lookup and
+   unconditionally revokes it immediately after, before any other code runs —
+   documented in detail in `auth.py`'s module docstring and `rls.py`'s, since
+   it is the one deliberate, narrow exception to "no request path ever sets
+   `rls_bypass`."
+3. **`str(sqlalchemy.engine.URL(...))` masks the password** (renders it as
+   `***`) — `runtime_database_url`'s first draft used `str(url)` and would
+   have produced a connection string with a literal, non-functional `***` in
+   place of the real password. Caught by a unit test
+   (`test_runtime_database_url_swaps_to_restricted_app_role_for_postgresql`)
+   before it ever touched a real connection. Fixed with
+   `url.render_as_string(hide_password=False)`.
+4. **Session-level GUCs (`is_local=false`, deliberately chosen so tenant
+   context survives a request handler's intermediate `session.commit()`
+   calls) leak across pooled-connection reuse if nothing resets them.** Found
+   twice: once in `webhook_worker.py` (fixed by clearing `rls_bypass` after
+   each batch) and once in this milestone's own `postgres_client` test
+   fixture (its hand-rolled session override didn't mirror
+   `get_session`'s real teardown, which caused three tests to fail with a
+   confusing, unrelated-looking `403`/`200`-instead-of-`409` symptom before
+   the actual cause — stale context from an earlier request corrupting a
+   later request's cross-tenant candidate lookup — was traced down). This is
+   exactly the "connection-pool tenant-context leakage" scenario called out
+   in this section's own "tests required" line, and it would not have been
+   caught without a fixture that actually exercises connection reuse.
+
+**Automated tests added** (all new, none weakened or removed): `tests/test_oidc.py`
+(9 tests — valid/expired/wrong-audience/wrong-issuer/missing-subject/tampered-signature/
+wrong-key-signed/malformed-construction, no network); `tests/test_tenant_isolation_postgres.py`
+(7 tests, real Postgres via the restricted role — default-deny with no context set,
+per-tenant read isolation, cross-tenant fetch-by-ID denial, cross-tenant `INSERT`
+denial via `WITH CHECK`, isolation holds on a second table, `rls_bypass` grants/revokes
+correctly, connection-reuse leakage on a pinned single-connection pool);
+`tests/test_auth_tenant_isolation_api_postgres.py` (9 tests, full HTTP stack against
+real Postgres with insecure header auth and dev login both disabled — OIDC login
+resolves the right tenant, unprovisioned identity rejected, tampered token rejected,
+missing token rejected, cross-tenant device read denied, cross-tenant ticket write
+denied, ambiguous multi-tenant email requires and correctly uses `X-Tenant-ID`
+disambiguation, role enforcement still applies through OIDC, insecure header auth
+rejected in production mode); `tests/test_config.py` (+5 tests for the new
+`app_role_password`/OIDC production checks and `runtime_database_url` derivation);
+`tests/test_dev_login_postgres.py` (1 test, added after the independent security
+review below — the development login picker against real RLS).
+
+**Verification performed:** `mypy` clean (26 files); `ruff check`/`ruff format --check`
+clean; full `pytest` suite against a real ephemeral `postgres:17-alpine` container —
+**64 passed**, only the 3 pre-existing Linux-only failures from Milestone 1 remain
+(unaffected by this work); `npm run typecheck` and `npm run build` clean (frontend
+untouched by this milestone). The real Alembic migration (not just the equivalent DDL
+tests apply directly) was run end-to-end against a fresh container: `alembic upgrade
+head` succeeds, confirmed via direct inspection that `helpdesk_app` exists with
+`rolsuper=false, rolbypassrls=false`, all 14 policies exist, `users` has
+`relrowsecurity=true, relforcerowsecurity=true`, and the expected grants are present;
+`alembic downgrade -1` cleanly removes the role and every policy; re-running `upgrade
+head` afterward succeeds again (no leftover-state issues). Not yet verified: a full
+`docker compose up` end-to-end smoke test (the migration+role+connection logic was
+verified directly against Postgres as above, which exercises the identical code path,
+but the full container topology wasn't re-run this session) — recommended before
+considering this deployable, not before considering the milestone's own DoD met.
+
+**Independent adversarial security review** (the "security/threat review" step,
+performed by a separate review pass against the finished implementation, not by
+the same reasoning that produced it): found one real, high-priority functional
+bug and two low-severity consistency gaps; found no cross-tenant data leak.
+
+- **Confirmed and fixed:** `development_users()`/`development_login()` in
+  `api.py` (the demo login picker) ran a `users`/`tenants` query with no
+  Principal and no tenant context bound — exactly the same
+  "resolve-identity-before-a-tenant-is-known" problem `auth.py`'s other three
+  identity lookups already had to solve, but this pair was missed because no
+  existing fixture combination exercised development login under real RLS
+  (`postgres_client` deliberately disables dev login; the SQLite `client`
+  fixture has no RLS to catch it). Under RLS this would have silently broken
+  the exact `docker compose up` → "select a demo user" flow the README
+  documents, returning an empty user list and a 401 for every valid demo user
+  — fails closed, not a leak, but a real regression, and a tempting one to
+  "fix" by weakening RLS instead. Fixed by wrapping both queries in the same
+  `resolving_identity` context manager the other lookups use (renamed from
+  `_resolving_identity` to `resolving_identity` since it's now used across
+  modules), safe here because it's already gated to `environment ==
+  "development"` by `_require_development_login()`. Added
+  `tests/test_dev_login_postgres.py` as a permanent regression test — the
+  picker and login flow now verified end-to-end against real RLS.
+- **Fixed for consistency (low severity):** `seed.py` opened a session via
+  `SessionLocal()` directly and never reset tenant context on exit, the same
+  gap class as the `webhook_worker.py`/test-fixture leaks found earlier in
+  this milestone. Low real-world risk (`seed.py` is a one-shot process that
+  exits immediately after, per `compose.yaml`'s `helpdesk-seed` service, so
+  there is no real "next consumer" of its connection today) but fixed anyway
+  for the invariant to actually hold everywhere, not just where it currently
+  matters. `reset_tenant_context` (renamed from `_reset_tenant_context`, same
+  reasoning as `resolving_identity` above) is now called at the end of `seed()`.
+- **No fix needed, investigated and ruled out:** algorithm-confusion attacks
+  against OIDC verification (the `algorithms=` allowlist passed to
+  `jwt.decode` is fixed to `RS256`/`ES256`, never influenced by anything in
+  the token itself); the `_resolving_identity`/`resolving_identity` bypass
+  window ever leaking bypassed data to a client (each window wraps exactly
+  one lookup assigned to a local variable, never serialized before the
+  `finally` clears bypass); the `helpdesk_app` role having more privilege
+  than declared (verified directly against the live migration output:
+  `rolsuper=false, rolbypassrls=false`, exactly the declared `SELECT,
+  INSERT, UPDATE, DELETE` + sequence grants, nothing else); `require_agent`'s
+  bypass window disclosing anything beyond what was already effectively
+  public (the device ID is already the URL path every legitimate agent
+  request contains; the actual authorization decision remains the
+  `hmac.compare_digest` check, unaffected by RLS either way).
+- **Noted, not acted on (accepted as low-severity):** `reset_tenant_context`
+  doesn't retry if the first of its two `set_config` calls succeeds but the
+  second raises — `pool_pre_ping=True` makes a connection unhealthy enough to
+  fail mid-reset unlikely to survive to a next checkout anyway. No test
+  exercises this specific partial-failure path.
+
+**Deliberately out of scope for this milestone** (not asked for, flagged for a
+future decision rather than silently built or silently skipped): a frontend OIDC
+login UI (the existing development login page is unaffected and still the only
+way to authenticate via the browser today); an invitation/user-provisioning flow
+(new users are still created only via direct DB access or the tenant-bootstrap
+endpoint — the multi-tenant-email disambiguation path was tested using this same
+direct-creation pattern); agent mTLS/credential rotation (explicitly Milestone 3).
 
 ---
 

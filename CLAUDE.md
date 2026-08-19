@@ -57,12 +57,13 @@ CI (`.github/workflows/ci.yml`) runs, as two independent jobs:
 
 Run the equivalent locally before considering backend or frontend work done.
 
-### Known toolchain baseline (updated 2026-08-19, post-Milestone-1)
+### Known toolchain baseline (updated 2026-08-19, post-Milestone-2)
 
 - `mypy` is clean (`strict = true`, `platform = "linux"` in `pyproject.toml` — this repo is Linux-deployed end to end, so mypy is pinned to that platform rather than whatever OS it happens to run on). Keep it clean; don't reintroduce `Optional`-access bugs or bare generic container types.
 - `pytest` has 3 tests that only pass on Linux (`test_linux_agent.py`'s file-permission assertion, two `test_linux_collectors.py` tests reading `/proc/*`) — they fail on Windows dev machines by design (unmocked POSIX calls), not by regression. CI runs on `ubuntu-latest` where they're expected to pass.
-- `tests/conftest.py` holds the shared fixtures: `client` (in-memory SQLite, used by most tests) and `postgres_session_factory` (real PostgreSQL, used only by `tests/test_persistence_postgres.py` to exercise the `pg_advisory_xact_lock` branch in `persistence.py::SqlAuditLog.append` — the one code path SQLite silently no-ops). Set `HELPDESK_TEST_DATABASE_URL` to a disposable Postgres database to run those tests locally; without it they skip cleanly. CI's `postgres` service container in `.github/workflows/ci.yml` sets this automatically.
-- See `docs/IMPLEMENTATION_PLAN.md` for the full current-state audit and the milestone roadmap toward a production-ready SaaS — check its Milestone 1 "Actual completion status" block before assuming a capability is missing; check the numbered audit sections (1-9) for everything not yet started.
+- `tests/conftest.py` holds the shared fixtures. SQLite: `client` (in-memory, used by most tests). Real PostgreSQL (skip cleanly unless `HELPDESK_TEST_DATABASE_URL` is set to a disposable database — CI's `postgres` service container sets this automatically): `postgres_session_factory` (schema-owner connection, no RLS — for `persistence.py`'s advisory-lock tests); `postgres_rls_session_factory` / `postgres_rls_single_connection_factory` (RLS applied, connects as the restricted `helpdesk_app` role — see below); `postgres_client` (full API TestClient in production-like mode: RLS + OIDC + restricted role together). `tests/support.py` holds shared OIDC test-token helpers.
+- **Any fixture or code path that opens its own PostgreSQL session outside `helpdesktool.database.get_session()` must reset `app.current_tenant_id`/`app.rls_bypass` on teardown itself** (call `helpdesktool.database.reset_tenant_context`, or mirror its pattern). `get_session()` does this automatically; nothing else does — this was missed once in `webhook_worker.py`, once in a test fixture, and once in `helpdesktool/api.py`'s development-login endpoints (caught by an independent security review, not by testing — see `docs/IMPLEMENTATION_PLAN.md` Milestone 2's "bugs found"/security-review notes) before this session ended. Any new endpoint or script that queries `users`/`devices` before a tenant is known needs `helpdesktool.auth.resolving_identity`, the same narrow bypass those three fixes all use.
+- See `docs/IMPLEMENTATION_PLAN.md` for the full current-state audit and the milestone roadmap toward a production-ready SaaS — check the relevant milestone's "Actual completion status" block before assuming a capability is missing; check the numbered audit sections (1-9) for everything not yet started.
 
 ## Architecture
 
@@ -98,13 +99,16 @@ FastAPI control plane (:8000) ----> PostgreSQL
 - `incidents.py` — deterministic, tenant-scoped incident correlation (e.g. low-disk detection/recovery/reopen) from inventory telemetry.
 - `persistence.py` — SQLAlchemy-backed adapters (`SqlAuditLog`, etc.) bridging domain state to `db_models`.
 - `db_models.py` — SQLAlchemy ORM models (tenants, users, devices, tickets, incidents, actions, audit rows, webhook subscriptions/deliveries).
+- `database.py` — the module-level SQLAlchemy `engine`/`SessionLocal` (bound to the restricted `helpdesk_app` role via `Settings.runtime_database_url` for PostgreSQL) and `get_session()`, the FastAPI dependency every request uses. `get_session()` unconditionally resets the PostgreSQL tenant-context GUCs on teardown — see `set_tenant_context`/`set_rls_bypass` here and the trust-model note in `auth.py`.
 - `events.py` — canonical domain events (`EventType`) and transactional publication helpers; audit-producing state transitions map to these in the same DB transaction.
 - `audit.py` — append-only, hash-chained audit event store contract.
 - `integrations.py` — provider-neutral integration contracts and signed webhook delivery (SSRF-safe: rejects loopback/private/link-local/multicast destinations, HTTPS required by default).
-- `webhook_worker.py` — separate long-running process draining the transactional webhook outbox with bounded retry/backoff and dead-lettering (`helpdesk-webhook-worker` entry point).
-- `auth.py` / `development_auth.py` — request principal resolution; `development_auth.py` is an explicitly development-only signed browser session mechanism that must be disabled outside local development (see `Settings.development_login_enabled`).
-- `config.py` — `pydantic-settings` `Settings`, env-prefixed `HELPDESK_`, loaded from `.env`.
-- `seed.py` — idempotent demo-tenant seeding (`helpdesk-seed` entry point), safe to rerun.
+- `webhook_worker.py` — separate long-running process draining the transactional webhook outbox with bounded retry/backoff and dead-lettering (`helpdesk-webhook-worker` entry point); the one process that legitimately sets the cross-tenant `rls_bypass` GUC (see `rls.py`), narrowly and only for its own batch.
+- `auth.py` — request principal resolution and PostgreSQL tenant-context binding. Production human auth is OIDC (`oidc.py`) — a `Bearer` token is verified, then the tenant is resolved from its cryptographically verified `email` claim against `users`, never from a client header. Development browser sessions (`development_auth.py`) and the insecure `X-Tenant-ID`/`X-User-ID` header path stay available but are strictly gated to `environment == "development"` and fail closed otherwise (`Settings.validate_security`). See the module's docstring for the full trust model, including the narrow, documented `resolving_identity` exception (identity-resolution lookups must run before any tenant is known, so they can't themselves be RLS-scoped).
+- `oidc.py` — provider-neutral OIDC access-token verification (`OIDCVerifier`). Not tied to any vendor; works with any standards-compliant provider that publishes a JWKS endpoint.
+- `rls.py` — single source of truth for PostgreSQL row-level security: which tables are tenant-scoped, the `tenant_isolation` policy DDL, and provisioning of the restricted `helpdesk_app` database role RLS enforcement depends on (see `database.py` below). Shared by migration `0005` and by RLS-related test fixtures — never duplicate this DDL elsewhere.
+- `config.py` — `pydantic-settings` `Settings`, env-prefixed `HELPDESK_`, loaded from `.env`. `runtime_database_url` derives the restricted-role connection the API/webhook-worker actually use at runtime from `database_url` + `app_role_password` — see `database.py`.
+- `seed.py` — idempotent demo-tenant seeding (`helpdesk-seed` entry point), safe to rerun. Binds its own tenant context via `set_tenant_context` since it now runs as the restricted role too.
 
 ### Linux agent (`linux_agent/`)
 
@@ -116,7 +120,7 @@ Single-page app in `frontend/src/main.tsx` covering Dashboard, Devices, Tickets,
 
 ### Data flow / safety invariants to preserve
 
-- Tenant ID always comes from authenticated identity/request context, never from client-supplied payload fields.
+- Tenant ID always comes from authenticated identity/request context, never from client-supplied payload fields — enforced both in application queries and, since Milestone 2, by PostgreSQL Row-Level Security as a second, independent layer (see `auth.py`'s module docstring for the full trust model).
 - Every mutating action passes through `PolicyEngine` (default deny) before it can become a queued job; high-risk skills require independent approval (separation of duties — the approver cannot be the requester).
 - Jobs are device-bound, lease-based, and idempotently claimed/reported by the agent.
 - Audit events are hash-chained and written transactionally alongside the state change they describe; domain events for webhook delivery are expanded into durable outbox rows in the same transaction.
@@ -125,9 +129,8 @@ Single-page app in `frontend/src/main.tsx` covering Dashboard, Devices, Tickets,
 
 ### Known deferred/limited areas (see README "Known limitations")
 
-- Auth is development-only (signed HMAC sessions / header auth); production OIDC/JWT is not implemented.
-- Tenant isolation is enforced in application queries, not Postgres Row Level Security.
-- Agent bearer credentials are long-lived; rotation/mTLS is not yet implemented.
+- Production human auth is OIDC (`helpdesktool/oidc.py` + `auth.py`), and tenant isolation is enforced by PostgreSQL Row-Level Security (`helpdesktool/rls.py`, migration `0005`) in addition to application-level filtering — both as of Milestone 2. There is still no frontend OIDC login UI; the browser can currently only authenticate via the development login page, which remains development-only.
+- Agent bearer credentials are long-lived; rotation/mTLS is not yet implemented (Milestone 3).
 - No generic disk-cleanup skill exists by design — only `service.restart` as a reference mutating executor.
 - **Abandoned job claims never recover.** `claim_job` sets `status="claimed"` with a 60s `lease_expires_at`; nothing ever requeues an expired claim back to `queued` or fails it out. If an agent crashes between claiming and reporting, that action is stuck forever with no operator-visible signal. Don't build new features on top of the job-claim flow assuming lease expiry is handled — it isn't yet (see `docs/IMPLEMENTATION_PLAN.md` Milestone 3).
 - The remediation "skill registry" is a hardcoded two-item list literal (`SKILLS` in `api.py`), not a versioned/signed/data-driven registry. Adding a skill today means shipping synchronized code changes to the control plane and every agent.

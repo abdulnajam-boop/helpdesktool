@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from .config import get_settings
-from .database import SessionLocal
+from .database import SessionLocal, reset_tenant_context, set_tenant_context
 from .db_models import (
     Action,
     Device,
@@ -40,6 +40,11 @@ def seed() -> None:
             tenant = Tenant(name="Acme IT")
             session.add(tenant)
             session.flush()
+        # This script only ever seeds one tenant's data per run, so it is
+        # scoped to that tenant rather than using the webhook worker's
+        # cross-tenant bypass — least privilege for a script that doesn't
+        # need more than that.
+        set_tenant_context(session, tenant.id)
         users: dict[str, User] = {}
         for email, role in DEMO_USERS:
             user = session.scalar(
@@ -193,6 +198,12 @@ def seed() -> None:
         elif low_disk_incident:
             action.ticket_id = low_disk_incident.ticket_id
         session.commit()
+        # Consistency with get_session()'s teardown: this is a one-shot
+        # process that exits right after, so there is no real "next
+        # consumer" of this connection in practice, but leaving tenant
+        # context bound past this point is still an unnecessary invariant
+        # violation if that ever changes.
+        reset_tenant_context(session)
         print(f"Seeded development tenant {tenant.name} ({tenant.id})")
 
 
