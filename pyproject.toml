@@ -43,5 +43,6 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.mypy]
 python_version = "3.11"
+platform = "linux"
 strict = true
 packages = ["helpdesktool", "linux_agent"]
