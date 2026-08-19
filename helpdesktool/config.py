@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_role_password: str = "change-me-before-use"
     bootstrap_token: str = "change-me-before-use"
     job_claim_secret: str = "change-me-before-use"
+    job_signing_seed: str = "change-me-before-use"
     environment: str = "development"
     allow_insecure_header_auth: bool = True
     development_login_enabled: bool = True
@@ -103,11 +104,13 @@ class Settings(BaseSettings):
         if self.environment != "development" and "change-me-before-use" in {
             self.bootstrap_token,
             self.job_claim_secret,
+            self.job_signing_seed,
             self.development_session_secret,
             self.app_role_password,
         }:
             raise RuntimeError(
-                "bootstrap, session, job claim, and app role secrets must be changed"
+                "bootstrap, session, job claim, job signing, and app role "
+                "secrets must be changed"
             )
 
 

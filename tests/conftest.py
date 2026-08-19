@@ -27,7 +27,11 @@ from helpdesktool.rls import (
     stage_app_role_password_statement,
 )
 from helpdesktool.skills import compute_manifest_hash
-from tests.support import StaticKeyResolver, generate_test_keypair
+from tests.support import (
+    TEST_JOB_SIGNING_SEED,
+    StaticKeyResolver,
+    generate_test_keypair,
+)
 
 TEST_OIDC_ISSUER = "https://idp.test.internal/"
 TEST_OIDC_AUDIENCE = "https://api.test.internal"
@@ -304,6 +308,7 @@ def postgres_client(
     monkeypatch.setenv("HELPDESK_DEVELOPMENT_LOGIN_ENABLED", "false")
     monkeypatch.setenv("HELPDESK_BOOTSTRAP_TOKEN", "test-bootstrap-token")
     monkeypatch.setenv("HELPDESK_JOB_CLAIM_SECRET", "test-job-claim-secret")
+    monkeypatch.setenv("HELPDESK_JOB_SIGNING_SEED", TEST_JOB_SIGNING_SEED)
     monkeypatch.setenv("HELPDESK_DEVELOPMENT_SESSION_SECRET", "test-session-secret")
     monkeypatch.setenv("HELPDESK_APP_ROLE_PASSWORD", TEST_APP_ROLE_PASSWORD)
     monkeypatch.setenv("HELPDESK_SERVICE_ALLOWLIST", "demo.service")

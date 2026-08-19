@@ -18,6 +18,8 @@ class AgentConfig:
     inventory_seconds: int = 3600
     allowed_services: tuple[str, ...] = ()
     monitored_services: tuple[str, ...] = ()
+    signing_public_key_pem: str | None = None
+    signing_key_version: int | None = None
 
     @classmethod
     def load(cls, path: Path) -> "AgentConfig":

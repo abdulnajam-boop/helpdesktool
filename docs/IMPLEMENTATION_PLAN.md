@@ -680,19 +680,17 @@ since local Windows runs always skip 3 and CI hadn't gone green yet).
 
 ### Milestone 3 — Agent/job trust hardening and durable job lifecycle
 
-> **Actual completion status (2026-08-19): PARTIAL.** Server-side endpoint trust
-> is done and tested against real PostgreSQL (see below): lease reaper, device
-> credential rotation (admin-initiated and agent self-service), device
-> revocation, one-time enrollment tokens with single-use enforcement. **Not
-> done in this pass:** signed/versioned job envelopes (explicitly deferred to
-> pair with Milestone 4's skill registry, as originally planned below) and the
-> Linux agent's durable local execution journal (the agent-side crash-recovery
-> half of this milestone — the current `processed.json` still only guards
-> against re-processing *completed* actions, not a crash between "restart
-> succeeded" and "result reported"). Revisit this milestone to close those two
-> before calling it fully done.
+> **Actual completion status (2026-08-20): DONE except mTLS.** The two gaps
+> called out below when this milestone was first marked PARTIAL — signed,
+> versioned job envelopes and a durable agent-side execution journal — are
+> now both built and tested (see "Endpoint trust hardening" below). What
+> remains genuinely out of scope for this pass: certificate/mTLS-based
+> transport identity (evaluated — see that section's reasoning for why a
+> symmetric-derived Ed25519 envelope signature was judged the higher-value,
+> lower-risk addition to build first, and what a real mTLS rollout would
+> require beyond this).
 >
-> **What was actually built:**
+> **What was actually built (2026-08-19, server-side endpoint trust):**
 > - `helpdesktool/lease_reaper.py` (new): finds `Action` rows stuck in
 >   `status="claimed"` past their `lease_expires_at`, and either requeues them
 >   (bounded by the existing `attempt` counter `claim_job` already increments,
@@ -755,6 +753,99 @@ since local Windows runs always skip 3 and CI hadn't gone green yet).
 > attempts remain, escalates to `failed` once exhausted, unexpired claims left
 > alone, non-`claimed` actions ignored). Full suite after this work: **76
 > passed** (3 pre-existing Linux-only failures unaffected), mypy/ruff clean.
+>
+> **Endpoint trust hardening — signed job envelopes and durable execution
+> journal (2026-08-20):**
+>
+> - New `agent_common/` package (new top-level, alongside `linux_agent`/
+>   `windows_agent`): dependency-light primitives (stdlib + `cryptography`,
+>   now a direct dependency rather than only transitive via `pyjwt[crypto]`)
+>   shared by both agents but never imported by the control plane's own
+>   request path, keeping either agent's install lightweight.
+>   - `agent_common/signing.py` — `verify_envelope`: checks, in a fixed
+>     order, that a claimed job envelope is well-formed, genuinely signed by
+>     the pinned key, addressed to this exact device and tenant, not
+>     expired, and for a skill id/version the agent's own hardcoded allowlist
+>     actually recognizes. `canonical_payload` (the exact signed bytes) is
+>     imported by `helpdesktool/job_signing.py` too, so signer and every
+>     verifier share one definition of "what gets signed" — they can never
+>     silently disagree about field order or whitespace.
+>   - `agent_common/journal.py` — `ExecutionJournal`: durably records every
+>     claim -> executing -> executed -> reported transition (atomic
+>     temp-file-then-`os.replace` writes, `0o600` permissions, mirroring
+>     `AgentConfig.save`'s existing pattern) *before* the corresponding
+>     real-world action happens. On restart, `recover_interrupted_jobs`
+>     resends an already-known result for an `"executed"` entry (no
+>     re-execution, ever) and, for a `"claimed"`/`"executing"` entry where the
+>     underlying change's outcome is unknown, calls a new `verify_only`
+>     method on the executor — observes current state without touching the
+>     service — rather than blindly restarting it a second time. This is the
+>     concrete fix for the "crash between restart succeeded and result
+>     reported" gap this milestone was reopened to close.
+> - `helpdesktool/job_signing.py`: control-plane side. The Ed25519 private
+>   key is *derived* (SHA-256 into a 32-byte seed) from
+>   `Settings.job_signing_seed` rather than stored anywhere — same
+>   dev-safe-default pattern as every other secret in this codebase
+>   (`validate_security` rejects the placeholder outside development), but
+>   critically gives a *stable* keypair across control-plane restarts, which
+>   matters because agents pin the public key on first contact
+>   (trust-on-first-use, via the enrollment response or
+>   `GET /v1/devices/{id}/signing-key`) and never silently accept a changed
+>   key later — a real key rotation story (publishing two valid keys during a
+>   transition window) is explicitly not built; today a rotated key makes
+>   every already-pinned agent fail closed until an operator clears its local
+>   `signing_public_key_pem` to force a fresh TOFU fetch.
+> - `claim_job` now returns a full signed envelope (job id, action id,
+>   device id, tenant id, skill id **and the active manifest's version**
+>   from Milestone 4's registry, parameters, device OS, issued/expiry
+>   timestamps, a random nonce, key version, signature) instead of a flat,
+>   unsigned dict. `POST /v1/devices/enroll` and `.../enroll-with-token`
+>   both return the current public key + version directly in their response.
+> - Both agents' `execute_job` now runs `verify_envelope` before ever
+>   touching the executor, and their `SUPPORTED_SKILL_VERSIONS` constant is
+>   the agent-local authority on which skill_id/version pairs it will run —
+>   a manifest existing in the control plane's registry is necessary but not
+>   sufficient, exactly preserving the "no shell, no parameter-templated
+>   execution, agent's own code is the sole authority over *how* something
+>   runs" invariant from `CLAUDE.md` (a registry entry can declare policy
+>   metadata for a skill id no agent implements; it simply never becomes
+>   executable until an agent ships the matching code, which is intentional,
+>   not a gap to close later).
+> - **mTLS evaluated, not built this pass.** A real mTLS rollout needs a
+>   certificate authority, a certificate issuance/renewal flow at enrollment
+>   (probably folded into the existing enrollment-token flow), client-cert
+>   verification at the ASGI/reverse-proxy layer, and a rotation/revocation
+>   story independent of the application-level device-credential rotation
+>   that already exists — each of those is a real infrastructure decision
+>   (which CA software, where certs live, how a reverse proxy in front of
+>   uvicorn terminates and forwards client-cert info) this pass judged out of
+>   scope to make unilaterally. The signed-envelope work above is a strictly
+>   smaller, self-contained addition that closes the same class of gap this
+>   milestone names ("agents must verify jobs before execution") for
+>   *job content integrity* specifically, without those infrastructure
+>   dependencies; mTLS would additionally authenticate the *transport*
+>   itself, which today still relies on TLS + the existing bearer-token
+>   device credential.
+> - **Tests:** `tests/test_agent_common_signing.py` (11 cases — valid
+>   envelope verifies, wrong key fails, post-signing tampering invalidates
+>   the signature, wrong device/tenant/skill-version/expired/malformed all
+>   rejected with a specific reason, key derivation is stable and
+>   seed-specific), `tests/test_execution_journal.py` (8 cases — durable
+>   reload from disk, restrictive file permissions, full state-transition
+>   sequence, pending excludes reported entries, a requeued attempt gets a
+>   distinct job id, pruning keeps only the most recent entries, unknown job
+>   ids are safely ignored), `tests/test_job_envelope_api.py` (2 cases — a
+>   real `POST .../claim` response independently re-verifies against the
+>   control plane's own derived public key, proving `claim_job` signs
+>   correctly rather than just attaching a plausible-looking field; the
+>   dedicated signing-key endpoint matches what enrollment already
+>   returned), plus `tests/test_linux_agent.py`/`tests/test_windows_agent.py`
+>   rewritten around real signed envelopes (9 and 8 cases respectively,
+>   including both crash-recovery paths per agent). Full suite: **154
+>   passed**, 0 failed, 0 skipped, verified in a `python:3.13` Linux
+>   container against a real Postgres 17 container matching CI, including a
+>   from-scratch `alembic upgrade head` run (no migration was needed for this
+>   work — the signing key is derived, never stored).
 
 **Build:**
 - A server-side lease reaper: a scheduled task (webhook-worker-style loop, or a
