@@ -17,6 +17,15 @@ class DeviceEnroll(BaseModel):
     os: Literal["linux", "windows"]
 
 
+class DeviceRevoke(BaseModel):
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class EnrollmentTokenCreate(BaseModel):
+    label: str = Field(default="", max_length=200)
+    ttl_minutes: int = Field(default=60, ge=1, le=10_080)
+
+
 class HeartbeatCreate(BaseModel):
     status: dict[str, Any] = Field(default_factory=dict)
 

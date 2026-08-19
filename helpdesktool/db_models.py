@@ -57,10 +57,42 @@ class Device(Base):
     hostname: Mapped[str] = mapped_column(String(255))
     os: Mapped[str] = mapped_column(String(30))
     agent_key_hash: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_reason: Mapped[str | None] = mapped_column(String(200))
+    credential_rotated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     enrolled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EnrollmentToken(Base):
+    """A short-lived, single-use token an admin generates out-of-band and
+    hands to whoever is installing an agent, so the agent can self-enroll
+    without an authenticated human session at enrollment time. Only the
+    hash is stored; the raw token is returned exactly once, at creation.
+    """
+
+    __tablename__ = "enrollment_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    label: Mapped[str] = mapped_column(String(200), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    used_by_device_id: Mapped[str | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL")
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class DeviceInventory(Base):

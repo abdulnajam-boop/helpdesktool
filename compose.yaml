@@ -79,5 +79,18 @@ services:
     cap_drop: ["ALL"]
     restart: unless-stopped
 
+  lease-reaper:
+    build: .
+    env_file: .env
+    command: ["helpdesk-lease-reaper"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
 volumes:
   postgres-data:

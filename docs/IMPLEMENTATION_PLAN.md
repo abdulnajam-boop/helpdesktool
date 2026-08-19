@@ -680,6 +680,82 @@ since local Windows runs always skip 3 and CI hadn't gone green yet).
 
 ### Milestone 3 — Agent/job trust hardening and durable job lifecycle
 
+> **Actual completion status (2026-08-19): PARTIAL.** Server-side endpoint trust
+> is done and tested against real PostgreSQL (see below): lease reaper, device
+> credential rotation (admin-initiated and agent self-service), device
+> revocation, one-time enrollment tokens with single-use enforcement. **Not
+> done in this pass:** signed/versioned job envelopes (explicitly deferred to
+> pair with Milestone 4's skill registry, as originally planned below) and the
+> Linux agent's durable local execution journal (the agent-side crash-recovery
+> half of this milestone — the current `processed.json` still only guards
+> against re-processing *completed* actions, not a crash between "restart
+> succeeded" and "result reported"). Revisit this milestone to close those two
+> before calling it fully done.
+>
+> **What was actually built:**
+> - `helpdesktool/lease_reaper.py` (new): finds `Action` rows stuck in
+>   `status="claimed"` past their `lease_expires_at`, and either requeues them
+>   (bounded by the existing `attempt` counter `claim_job` already increments,
+>   configurable via `Settings.lease_reaper_max_attempts`) or marks them
+>   `failed` with an `action.escalation_required` audit event once attempts are
+>   exhausted — closing the gap this whole milestone exists to fix. New
+>   `helpdesk-lease-reaper` console script and Compose service, mirroring
+>   `webhook_worker.py`'s existing pattern exactly (including the same
+>   cross-tenant `rls_bypass` usage, for the same reason).
+> - Device credential rotation: `POST /v1/devices/{id}/rotate-credential`
+>   (admin-initiated) and `POST /v1/devices/{id}/credential/renew` (agent
+>   self-service, authenticated with its own current credential) both issue a
+>   new token and immediately invalidate the old one.
+> - Device revocation: `POST /v1/devices/{id}/revoke` sets a new `active` flag
+>   (migration `0006`); `require_agent` now rejects any request — heartbeat,
+>   inventory, job poll/claim/result, credential renewal — from a revoked
+>   device with the same generic 401 as an invalid credential (no information
+>   leak about *why* it failed).
+> - One-time enrollment tokens: new `EnrollmentToken` model/table (migration
+>   `0006`, RLS-protected like every other tenant-scoped table — see the
+>   migration-immutability fix below), `POST /v1/devices/enrollment-tokens`
+>   (admin creates, short-lived, single-use), `GET`/`DELETE` for
+>   listing/revoking, and `POST /v1/devices/enroll-with-token` — an
+>   unauthenticated agent can self-enroll with a valid token instead of
+>   requiring an admin's browser session at install time. Single-use is
+>   enforced with `SELECT ... FOR UPDATE` to close the race between two
+>   concurrent uses of the same token. The existing admin-mediated
+>   `/v1/devices/enroll` is untouched and still works exactly as before.
+>
+> **A real bug found by actually running the migration, not by review:**
+> migration `0005` originally imported `TENANT_SCOPED_TABLES` directly from
+> `helpdesktool/rls.py` to decide which tables to apply RLS to. Adding
+> `enrollment_tokens` to that same shared, mutable constant for migration
+> `0006`'s benefit **silently changed what migration 0005 does** the next time
+> anyone runs `alembic upgrade head` against a fresh database — it would try to
+> `ALTER TABLE enrollment_tokens ENABLE ROW LEVEL SECURITY` before migration
+> `0006` had created that table, and fail immediately
+> (`UndefinedTable: relation "enrollment_tokens" does not exist`). Caught
+> immediately by actually running the full migration chain against a fresh
+> Postgres container (not by code review — this is exactly the kind of thing
+> that looks correct on paper). Fixed properly, not patched: migration `0005`
+> now hardcodes its own frozen snapshot of the 14 tables that existed when it
+> was written (`TABLES_AS_OF_THIS_MIGRATION`), and
+> `rls.provision_app_role_statements`/`revoke_app_role_statements` now
+> **require** an explicit `tables` argument rather than defaulting to the live
+> constants — making it structurally impossible for a future migration to
+> repeat this mistake by accident. Migration `0006` grants only the one new
+> table it adds, not a re-run of the full grant set. Re-verified end-to-end
+> after the fix: fresh `alembic upgrade head` through `0006` on a clean
+> Postgres container succeeds; direct inspection confirms 15 RLS policies (14
+> original + `enrollment_tokens`), the new `devices` columns, and correct
+> `helpdesk_app` grants on `enrollment_tokens`.
+>
+> **Tests added:** `tests/test_endpoint_trust.py` (8 tests, SQLite —
+> enrollment-token create/list/use/single-use-rejection/revoke-before-use,
+> role enforcement on token creation, admin credential rotation invalidates
+> the old token, agent self-service renewal, device revocation blocks
+> heartbeat *and* self-renewal, revoking one device doesn't affect another)
+> and `tests/test_lease_reaper.py` (4 tests — expired claim requeued when
+> attempts remain, escalates to `failed` once exhausted, unexpired claims left
+> alone, non-`claimed` actions ignored). Full suite after this work: **76
+> passed** (3 pre-existing Linux-only failures unaffected), mypy/ruff clean.
+
 **Build:**
 - A server-side lease reaper: a scheduled task (webhook-worker-style loop, or a
   new small worker process) that finds `Action` rows with `status="claimed"` and
