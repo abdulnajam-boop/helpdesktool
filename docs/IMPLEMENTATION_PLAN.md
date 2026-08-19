@@ -7,12 +7,13 @@ audits in `docs/REPOSITORY_AUDIT.md` and `docs/STABILIZATION_AUDIT.md` are histo
 snapshots (2026-08-15/16) and are now stale on several points corrected below; they are
 kept for history and should not be treated as current status.
 
-> **Status update (2026-08-19, same day):** Milestone 1 is implemented and locally
-> verified — see its section below for exact results. Sections 1-9 of the audit below
-> describe the state of the repository *before* Milestone 1 (i.e. they still describe
-> the 24 mypy errors, missing Postgres CI coverage, etc., as the historical baseline
-> the milestone plan was written against). Do not re-fix what Milestone 1 already
-> fixed; check its "Actual completion status" block first.
+> **Status update (2026-08-19, same day):** Milestone 1 is implemented, locally
+> verified, merged to `main`, and confirmed green on a real GitHub Actions run — see
+> its section below for exact results. Sections 1-9 of the audit below describe the
+> state of the repository *before* Milestone 1 (i.e. they still describe the 24 mypy
+> errors, missing Postgres CI coverage, etc., as the historical baseline the
+> milestone plan was written against). Do not re-fix what Milestone 1 already fixed;
+> check its "Actual completion status" block first.
 
 ## 1. What exists now
 
@@ -300,9 +301,11 @@ surface area, matching the philosophy already stated in the prior plan.
 
 ### Milestone 1 — Stabilize the toolchain and CI
 
-> **Actual completion status (2026-08-19): DONE, locally verified.** See the
-> verification block at the end of this section for exact commands/results and the
-> one caveat (no real GitHub Actions run was triggered — see below).
+> **Actual completion status (2026-08-19): DONE.** Every DoD item met, including a
+> real green GitHub Actions run on both jobs, and merged to `main` via a `--no-ff`
+> merge commit. See the verification block at the end of this section for exact
+> commands/results, and Section "CI verification" for the two CI-only issues found
+> and fixed after the initial local-only pass.
 
 **Build:**
 - Fix all 24 `mypy --strict` errors: proper generic type parameters in
@@ -382,13 +385,37 @@ verified by an actual green CI run, not just local execution.
 - `.github/workflows/ci.yml` updated: added a `postgres:17-alpine` service
   container to the `backend` job with a health check, and set
   `HELPDESK_TEST_DATABASE_URL` at the job level so `pytest` now runs the two new
-  Postgres-only tests for real in CI instead of skipping them. Verified the YAML
-  parses correctly; **not verified by an actual GitHub Actions run**, since that
-  requires pushing/opening a PR, which was out of scope for this milestone's
-  instructions (no push without asking first). This is the one open item against
-  the DoD's "verified by an actual green CI run" clause — recommend pushing this
-  branch (or opening a draft PR) once approved, purely to confirm the Actions run
-  is green, before considering the DoD clause fully closed.
+  Postgres-only tests for real in CI instead of skipping them.
+- **Verified by an actual green GitHub Actions run** (the DoD's remaining open
+  item, now closed): pushed `milestone-1-stabilization` to GitHub. This surfaced
+  two issues neither local execution nor code review had caught, both diagnosed
+  from real CI evidence (API run/job/log inspection, not guessing) and fixed on
+  the same branch:
+  1. The repository's "CI" workflow was found to be in GitHub's
+     `disabled_manually` state (confirmed via `GET .../actions/workflows`), so
+     the first push queued no run at all. This was a repository setting, not a
+     file problem — the user re-enabled it, and an empty, no-file-changes commit
+     was pushed to produce a new event for GitHub Actions to pick up.
+  2. On the first real run, the **backend job passed in full on the first try**
+     (mypy, ruff, and — the actual point of this milestone — `pytest` including
+     the two new PostgreSQL-only advisory-lock tests against the real `postgres`
+     service container). The **frontend job failed** on `npm run build` with
+     TypeScript errors TS6310/TS5096 in `frontend/tsconfig.node.json`
+     (`composite: true` together with `noEmit: true` is invalid for a project
+     reference target). This bug was invisible locally the entire time: the
+     local working tree already had an uncommitted fix to this exact file
+     present before Milestone 1 began, so every local `npm run build` in this
+     milestone silently built against the already-fixed file while the
+     committed version CI actually checks out still had the bug. Root-caused by
+     reproducing CI's exact steps against the real committed tree (`git archive`
+     of the pushed commit, fresh `npm install`, no local `node_modules`/lockfile)
+     rather than guessing, fixed with the same one-line change already sitting
+     uncommitted, re-verified in the same clean reproduction, then the full
+     local suite was re-run once more (ruff/mypy/pytest against a real ephemeral
+     Postgres, frontend typecheck/build) before committing.
+  - Final result: run
+    [32227036134](https://github.com/abdulnajam-boop/helpdesktool/actions/runs/32227036134)
+    on commit `b4456d6`, **both jobs, every step: success.**
 - Confirmed by direct code inspection (not assumption) that the 3 pre-existing
   Windows-platform test failures (`test_linux_agent.py`'s file-permission
   assertion, two `test_linux_collectors.py` tests) call directly into
