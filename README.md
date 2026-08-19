@@ -1,6 +1,6 @@
 # Helpdesktool
 
-Helpdesktool is a deterministic, safety-first IT operations SaaS MVP. It combines a FastAPI/PostgreSQL control plane, an unprivileged Linux endpoint agent, and a React operator console.
+Helpdesktool is a deterministic, safety-first IT operations SaaS MVP. It combines a FastAPI/PostgreSQL control plane, unprivileged Linux and Windows endpoint agents, and a React operator console.
 
 The executable trust boundary is:
 
@@ -15,15 +15,20 @@ The product is **not** a remote shell. Neither browser input nor future AI outpu
 
 ## What the MVP includes
 
-- Multi-tenant tenants, users, roles, devices, inventory, heartbeats, tickets, incidents, actions, approvals, execution results, audit events, and webhook integrations.
-- Development-only browser sessions for Owner, Admin, Operator, and Viewer demo users. Non-development environments fail closed if development authentication is enabled.
-- Dashboard and searchable browser pages for Devices, Tickets, Incidents, Actions, Approvals, Audit, Integrations, and Settings.
+- Multi-tenant tenants, users, roles, devices, inventory, heartbeats, tickets, incidents, actions, approvals, execution results, audit events, and webhook integrations, with PostgreSQL Row-Level Security enforcing tenant isolation as a second, independent layer beneath application-level filtering.
+- Production human authentication via provider-neutral OIDC (Authorization Code + PKCE from the browser, standard `.well-known/openid-configuration` discovery -- no vendor hardcoded). Development-only browser sessions remain available for Owner/Admin/Operator/Viewer demo users; both development mechanisms fail closed outside `development` environment.
+- Dashboard and searchable browser pages for Devices, Tickets, Incidents (with an AI-diagnosis panel), Actions, Approvals, Skills, Audit, Integrations, and Settings.
 - Deterministic low-disk detection, correlation, automatic ticket creation, recovery detection, incident reopening, and domain events.
 - A browser-accessible low-disk simulator which writes structured development telemetry without filling a real disk.
+- Provider-neutral, advisory-only AI incident diagnosis (any OpenAI-compatible endpoint, or a deterministic no-network fallback) -- schema-validated output, never self-authorizing; a diagnosis still has to be manually submitted through the normal policy/approval pipeline to become an action.
+- A versioned, integrity-checked remediation skill registry (risk tier, OS support, timeout, parameter shape as a `POST /v1/skills` data change) -- an agent still has to ship its own deterministic executor code for a skill to actually run.
 - Risk-based policy and separation-of-duties approval before mutating endpoint work is queued.
-- Device-bound job leases, claim-token validation, idempotent reporting, verification and rollback outcomes.
+- Device-bound job leases, cryptographically signed and versioned job envelopes (Ed25519, agents pin the public key via trust-on-first-use), replay protection, claim-token validation, idempotent reporting, verification and rollback outcomes.
+- A durable local execution journal on both agents recovering cleanly from a crash at any point in claim -> execute -> report, without ever risking a duplicate mutation.
+- Device credential rotation/revocation and one-time-token self-enrollment (`install-linux-agent.sh` / `install-windows-agent.ps1` use this to install with a single command).
 - Hash-chained tenant audit history and a transactional signed-webhook outbox.
-- An unprivileged Linux agent with inventory collectors and one allowlisted `service.restart` executor using fixed `systemctl` argument vectors and no shell.
+- Structured JSON logging with per-request correlation ids, a Prometheus `/metrics` endpoint, and background-worker liveness heartbeats.
+- Unprivileged Linux and Windows agents, each with inventory collectors and one allowlisted `service.restart` executor -- fixed `systemctl` argument vectors (Linux) or direct Win32 Service Control Manager calls (Windows), never a shell.
 
 ## Architecture
 
@@ -34,17 +39,19 @@ React/Vite operator console (:3000)
 FastAPI control plane (:8000) ----> PostgreSQL
   |       |       |                      |
   |       |       +--> audit + events --> webhook outbox worker
-  |       +----------> incident correlation + tickets
-  +------------------> policy + approvals + persistent jobs
+  |       +----------> incident correlation + tickets + AI diagnosis
+  +------------------> policy + approvals + signed, versioned jobs
                                       |
                                       v
-                         authenticated Linux agent
+                    authenticated Linux or Windows agent
+                     (signed-envelope verification + a
+                      durable local execution journal)
                                       |
                                       v
                     allowlisted deterministic executor
 ```
 
-Core backend modules live in `helpdesktool/`, the agent in `linux_agent/`, the browser application in `frontend/`, and additive Alembic migrations in `migrations/versions/`.
+Core backend modules live in `helpdesktool/`, the Linux agent in `linux_agent/`, the Windows agent in `windows_agent/`, primitives shared by both agents (job-envelope verification, the execution journal) in `agent_common/`, the browser application in `frontend/`, and additive Alembic migrations in `migrations/versions/`.
 
 ## Quick start: one command
 
@@ -128,7 +135,18 @@ npm run dev
 
 ## Linux agent
 
-Copy `agent.example.json` to `~/.config/helpdesktool/agent.json`, insert a tenant/user identity for enrollment, and keep the same narrow service allowlist in the server and agent configuration.
+Production install (single command, run as root -- installs a dedicated `helpdesk-agent` service account, a system-level systemd unit, and self-enrolls with a one-time token generated by an admin via `POST /v1/devices/enrollment-tokens` or the operator console's Devices page):
+
+```bash
+sudo ./deploy/install-linux-agent.sh \
+  --server-url https://api.example.com \
+  --enrollment-token <token> \
+  --allowed-services demo.service
+```
+
+Uninstall with `sudo ./deploy/uninstall-linux-agent.sh` (revoke the device's credential on the control plane first). See the script's `--help` and header comments for the full option list, including `--package-source` for pinning an exact release once one is published (it defaults to installing from this repo's `main` branch, which is fine for a demo/pilot but not for a real fleet rollout).
+
+For local development instead of a production install, copy `agent.example.json` to `~/.config/helpdesktool/agent.json`, insert a tenant/user identity for admin-mediated enrollment, and run it directly:
 
 ```bash
 python -m pip install -e .
@@ -138,7 +156,25 @@ chmod 600 ~/.config/helpdesktool/agent.json
 helpdesk-linux-agent --config ~/.config/helpdesktool/agent.json --once
 ```
 
-The agent stores its one-time credential with owner-only permissions, sends heartbeat/inventory, claims only jobs addressed to its device, validates leases and exact parameters, invokes `systemctl` without a shell, verifies the outcome, attempts rollback when necessary, and posts a structured result. Do not run it as root merely to make remediation work; use a narrow PolicyKit rule for only the test service.
+Either way, the agent stores its credential with owner-only permissions, sends heartbeat/inventory, claims only jobs addressed to its device, verifies each job's signed envelope (device/tenant/expiry/skill-version) before ever touching the executor, validates exact parameters against its own local allowlist, invokes `systemctl` without a shell, verifies the outcome, attempts rollback when necessary, durably journals every step so a crash at any point recovers cleanly on restart, and posts a structured result. Do not run it as root merely to make remediation work; the installer's dedicated service account already handles this correctly.
+
+Upgrade in place (config, credential, and execution journal are untouched -- only the installed package changes, no re-enrollment needed):
+
+```bash
+sudo systemctl stop helpdesk-linux-agent
+sudo /opt/helpdesktool/venv/bin/pip install --upgrade helpdesktool
+sudo systemctl start helpdesk-linux-agent
+```
+
+## Windows agent
+
+Production install (single command, run from an elevated PowerShell prompt -- installs the agent as a Windows Service under a low-privilege virtual service account, not `LocalSystem`, and self-enrolls with a one-time token):
+
+```powershell
+.\deploy\install-windows-agent.ps1 -ServerUrl https://api.example.com -EnrollmentToken <token> -AllowedServices Spooler
+```
+
+Uninstall with `.\deploy\uninstall-windows-agent.ps1`. See `deploy/README-windows-agent.md` for the full manual-step walkthrough (useful for understanding exactly what the script automates, or for environments that can't run it directly), NTFS ACL details, and the Win32 Service Control Manager trust model (no `sc.exe`, no shell, no PowerShell ever spawned by the agent itself to control a service).
 
 ## Integrations
 
@@ -149,18 +185,18 @@ Webhook signing secrets are environment references such as `env:HELPDESK_WEBHOOK
 ## Validation
 
 ```bash
-python -m pip install -e ".[dev]"
-python -c "import helpdesktool; import linux_agent"
-python -m compileall helpdesktool linux_agent
+python -m pip install -e ".[dev,windows]"
+python -c "import helpdesktool; import agent_common; import linux_agent; import windows_agent"
+python -m compileall helpdesktool agent_common linux_agent windows_agent
 pytest
 ruff check .
 ruff format --check .
 mypy
-cd frontend && npm install && npm run build
+cd frontend && npm install && npm run typecheck && npm test && npm run build
 cd .. && docker compose config && docker compose build
 ```
 
-CI performs the backend and frontend checks from the repository manifests.
+CI (`.github/workflows/ci.yml`) runs three independent jobs from the repository manifests: `backend` (the Python checks above), `frontend` (typecheck/test/build), and `docker` (builds the API and frontend Docker images and actually runs each one -- not just `docker build` -- specifically to catch startup failures a build alone can't).
 
 ## Shutdown and reset
 
@@ -180,9 +216,15 @@ docker compose up --build
 
 ## Known limitations
 
-- Development HMAC sessions and optional identity headers are not production identity. Production OIDC/JWT is deferred, and both development mechanisms must be disabled outside local development.
-- Tenant filtering is enforced in application queries; PostgreSQL Row Level Security is not yet enabled.
-- Agent bearer credentials are long-lived and require rotation/mTLS hardening before production endpoint deployment.
+This section is kept current as of 2026-08-20; see `docs/IMPLEMENTATION_PLAN.md` for the full, per-milestone audit this summary is drawn from.
+
+- **mTLS is not implemented.** Endpoint identity today is a bearer device credential (rotatable/revocable) plus cryptographically signed, versioned, replay-resistant job envelopes -- a real, tested layer of defense, but not certificate-based transport identity. Evaluated and deliberately deferred; see Milestone 3's notes for the reasoning and what a real rollout would need (a CA, cert issuance/rotation, reverse-proxy client-cert verification).
+- **No cryptographic signing on skill manifests.** The skill registry has integrity verification (a stored manifest's hash is recomputed and checked on every read, catching direct database tampering) but not an independent signature scheme.
+- **No key rotation story for job-envelope signing.** Only one signing key version exists; a rotated key makes every already-enrolled agent fail closed until an operator clears its locally pinned key to force re-pinning.
+- **No published package release yet.** The install scripts default to installing straight from this repo's `main` branch via `pip`'s `git+https` support (`--package-source`/`-PackageSource` overrides this) -- fine for a demo or pilot, not for a fleet rollout that needs an exact, pinned, reviewed version.
+- **The frontend has no route-level automated test coverage** beyond the OIDC/PKCE login-flow logic (`frontend/src/auth/oidc.test.ts`) -- no React Testing Library component tests yet, and no accessibility audit has been done.
+- **No frontend Reporting page and no list-endpoint pagination.** `/v1/devices`, `/v1/tickets`, `/v1/actions`, and `/v1/incidents` all still return unbounded, unpaginated results.
+- **No OpenTelemetry tracing.** Structured JSON logs with per-request correlation ids and Prometheus metrics exist; distributed tracing does not (no OTLP collector target has been chosen).
 - The MVP detects and verifies low-disk recovery but does not ship an unsafe generic disk-cleanup command. A future cleanup skill must define exact safe targets, permission, verification, and rollback/escalation behavior.
-- `service.restart` is the only mutating reference executor. It is appropriate for exercising policy/approval/job/verification/rollback, not for claiming that restarting a service fixes disk usage.
-- Windows agent, production billing, OIDC, AI diagnosis, RAG, advanced ticketing integrations, and Kubernetes deployment are intentionally deferred.
+- `service.restart` is the only mutating reference executor. It is appropriate for exercising policy/approval/job/verification/rollback, not for claiming that restarting a service fixes disk usage. Adding a genuinely new mutating skill always requires an agent code change -- the skill registry can declare policy metadata for a skill id, but never ships new execution logic, by design.
+- Production billing, RAG, advanced ticketing integrations, and Kubernetes deployment are intentionally deferred and out of scope for this MVP.

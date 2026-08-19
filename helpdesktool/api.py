@@ -572,6 +572,7 @@ def enroll_device_with_token(
     session.commit()
     return {
         "device_id": device.id,
+        "tenant_id": enrollment.tenant_id,
         "agent_token": device_token,
         "signing_public_key_pem": public_key_pem(get_settings().job_signing_seed),
         "signing_key_version": CURRENT_KEY_VERSION,

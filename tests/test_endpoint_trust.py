@@ -41,6 +41,11 @@ def test_enrollment_token_workflow(client):
     )
     assert enrolled.status_code == 201
     assert "agent_token" in enrolled.json()
+    # tenant_id must be present so a self-enrolling agent (which never
+    # authenticates as an admin and so never otherwise learns its tenant)
+    # can populate its own config and correctly verify signed job envelopes
+    # -- see linux_agent.agent.LinuxAgent.enroll_with_token.
+    assert enrolled.json()["tenant_id"] == identity["tenant_id"]
 
     # Single-use: the same token cannot enroll a second device.
     reuse = http.post(

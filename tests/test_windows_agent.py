@@ -198,3 +198,72 @@ def test_config_round_trips(tmp_path):
     )
     config.save(path)
     assert AgentConfig.load(path).agent_token == "secret"
+
+
+class _FakeTokenEnrollClient:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def enroll_with_token(self, token, external_id, hostname):
+        self.calls.append((token, external_id, hostname))
+        return self.response
+
+
+def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
+    """Unlike admin-mediated enroll(), a self-enrolling agent never learns
+    its tenant_id any other way -- it must come from the enrollment
+    response, since the whole point of token-based enrollment is not
+    needing tenant_id known upfront.
+    """
+    config = AgentConfig("http://localhost", "desktop-1", "", "")
+    config_path = tmp_path / "agent.json"
+    fake_client = _FakeTokenEnrollClient(
+        {
+            "device_id": "device-42",
+            "tenant_id": "tenant-42",
+            "agent_token": "secret-token",
+            "signing_public_key_pem": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n",
+            "signing_key_version": 1,
+        }
+    )
+    agent = WindowsAgent(
+        config, config_path, client=fake_client, service_manager=FakeServiceManager()
+    )
+
+    agent.enroll_with_token("one-time-token")
+
+    assert fake_client.calls == [
+        ("one-time-token", "desktop-1", fake_client.calls[0][2])
+    ]
+    assert agent.config.device_id == "device-42"
+    assert agent.config.tenant_id == "tenant-42"
+    assert agent.config.agent_token == "secret-token"
+    reloaded = AgentConfig.load(config_path)
+    assert reloaded.tenant_id == "tenant-42"
+    assert reloaded.device_id == "device-42"
+
+
+def test_enroll_with_token_is_a_noop_once_already_enrolled(tmp_path):
+    config = AgentConfig(
+        "http://localhost",
+        "desktop-1",
+        "tenant-1",
+        "",
+        device_id="device-1",
+        agent_token="already-have-one",
+    )
+    fake_client = _FakeTokenEnrollClient(
+        {"device_id": "x", "tenant_id": "y", "agent_token": "z"}
+    )
+    agent = WindowsAgent(
+        config,
+        tmp_path / "agent.json",
+        client=fake_client,
+        service_manager=FakeServiceManager(),
+    )
+
+    agent.enroll_with_token("some-token")
+
+    assert fake_client.calls == []
+    assert agent.config.agent_token == "already-have-one"
