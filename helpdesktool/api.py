@@ -13,9 +13,15 @@ from sqlalchemy import CursorResult, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .auth import Principal, require_agent, require_roles, require_user
+from .auth import (
+    Principal,
+    require_agent,
+    require_roles,
+    require_user,
+    resolving_identity,
+)
 from .config import get_settings
-from .database import get_session
+from .database import get_session, set_tenant_context
 from .db_models import (
     Action,
     Approval,
@@ -186,12 +192,17 @@ def _require_development_login() -> None:
 @app.get("/v1/auth/development/users")
 def development_users(session: Session = Depends(get_session)) -> list[dict[str, str]]:
     _require_development_login()
-    rows = session.execute(
-        select(User, Tenant.name)
-        .join(Tenant, Tenant.id == User.tenant_id)
-        .where(User.active.is_(True))
-        .order_by(User.email)
-    ).all()
+    # No Principal exists yet for this picker (that is the whole point of a
+    # login page) so nothing has bound this session's tenant context; this
+    # listing is itself the intended cross-tenant view of demo users, and is
+    # already gated to development-only above — see auth.resolving_identity.
+    with resolving_identity(session):
+        rows = session.execute(
+            select(User, Tenant.name)
+            .join(Tenant, Tenant.id == User.tenant_id)
+            .where(User.active.is_(True))
+            .order_by(User.email)
+        ).all()
     return [
         {"id": user.id, "email": user.email, "role": user.role, "tenant": tenant}
         for user, tenant in rows
@@ -203,7 +214,10 @@ def development_login(
     user_id: str = Query(min_length=1), session: Session = Depends(get_session)
 ) -> dict[str, Any]:
     _require_development_login()
-    user = session.scalar(select(User).where(User.id == user_id, User.active.is_(True)))
+    with resolving_identity(session):
+        user = session.scalar(
+            select(User).where(User.id == user_id, User.active.is_(True))
+        )
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid development user")
     settings = get_settings()
@@ -237,6 +251,11 @@ def create_tenant(
     tenant = Tenant(name=body.name)
     session.add(tenant)
     session.flush()
+    # No Principal exists yet for a brand-new tenant, so nothing has bound
+    # this session's row-level-security context — bind it to the tenant we
+    # just created so the owner row below satisfies the tenant_isolation
+    # policy's WITH CHECK.
+    set_tenant_context(session, tenant.id)
     user = User(tenant_id=tenant.id, email=body.admin_email, role="owner")
     session.add(user)
     session.flush()

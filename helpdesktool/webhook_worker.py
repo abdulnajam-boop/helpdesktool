@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
-from .database import SessionLocal
+from .database import SessionLocal, set_rls_bypass
 from .db_models import DomainEventRow, WebhookDelivery, WebhookSubscription
 from .integrations import (
     EnvironmentSecretsProvider,
@@ -36,6 +36,11 @@ class WebhookWorker:
         self.secrets = EnvironmentSecretsProvider(environment or dict(os.environ))
 
     def process_batch(self, session: Session, limit: int = 50) -> int:
+        # This worker delivers pending webhooks across every tenant in one
+        # batch by design (it is not driven by any per-request client input,
+        # so there is no untrusted tenant_id in play here) — see
+        # helpdesktool.rls for why this is the one place that sets this GUC.
+        set_rls_bypass(session, enabled=True)
         now = datetime.now(UTC)
         deliveries = session.scalars(
             select(WebhookDelivery)
@@ -49,6 +54,14 @@ class WebhookWorker:
         ).all()
         for delivery in deliveries:
             self._deliver(session, delivery, now)
+        session.commit()
+        # Symmetric with the enable above: this session's underlying
+        # connection is drawn from the same pool as API request sessions
+        # (they are separate processes in the real deployment topology per
+        # compose.yaml, but this keeps the invariant true even if that ever
+        # changes, and in-process tests that reuse the same engine). Never
+        # leave bypass=on on a connection once this batch is done with it.
+        set_rls_bypass(session, enabled=False)
         session.commit()
         return len(deliveries)
 

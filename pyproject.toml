@@ -14,6 +14,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2.6,<3",
+    "pyjwt[crypto]>=2.9,<3",
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.32,<1",
 ]
@@ -37,6 +38,7 @@ include = ["helpdesktool*", "linux_agent*"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
