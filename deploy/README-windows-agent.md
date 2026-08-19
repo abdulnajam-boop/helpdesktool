@@ -4,6 +4,19 @@ Mirrors `deploy/helpdesk-linux-agent.service`'s role for the Linux agent: how
 to install `windows_agent` as a real, boot-persistent, auto-restarting
 Windows Service rather than a foreground console process.
 
+**For a normal install, use `deploy/install-windows-agent.ps1` instead of
+following these steps by hand** -- it automates everything below (prerequisite
+check, venv install, token-based enrollment, service install under the
+low-privilege virtual account, ACLs, failure-recovery config) as one command:
+
+```powershell
+.\install-windows-agent.ps1 -ServerUrl https://api.example.com -EnrollmentToken <token> -AllowedServices Spooler
+```
+
+Uninstall with `.\uninstall-windows-agent.ps1`. The rest of this document
+explains what that script does and why, and covers the fully manual path for
+environments that can't run it directly.
+
 ## Prerequisites
 
 ```powershell
@@ -84,13 +97,27 @@ helpdesk-windows-agent-service stop
 helpdesk-windows-agent-service remove
 ```
 
-## Known limitation
+## Crash recovery
 
-The agent's local replay file (`agent.processed.json`, next to `agent.json`)
-guards against re-processing already-*completed* actions but — same as the
-Linux agent — does not yet protect against a crash between "restart
-succeeded" and "result reported" to the control plane. The server-side
-`helpdesk-lease-reaper` (Milestone 3) recovers the *job* in that case
-(requeues or escalates it after the lease expires), but the agent itself
-does not yet have a durable execution journal. See
-`docs/IMPLEMENTATION_PLAN.md` Milestone 3.
+The agent keeps a durable local execution journal (`agent.journal.json`,
+next to `agent.json` -- `agent_common/journal.py`) recording every
+claim -> executing -> executed -> reported transition *before* the
+corresponding real action happens. On restart, a crash after execution but
+before the result was reported just resends the already-known result; a
+crash before or during execution (outcome unknown) is recovered by
+*observing* current service state rather than ever restarting it a second
+time. The server-side `helpdesk-lease-reaper` independently recovers the
+*job* (requeues or escalates it once its claim lease expires) if the agent
+never reports at all. See `docs/IMPLEMENTATION_PLAN.md` Milestone 3.
+
+## Upgrade
+
+```powershell
+Stop-Service HelpdeskWindowsAgent
+& "C:\Program Files\Helpdesktool\venv\Scripts\pip.exe" install --upgrade helpdesktool[windows]
+Start-Service HelpdeskWindowsAgent
+```
+
+The config (`C:\ProgramData\helpdesktool\agent.json`), device credential,
+and execution journal are untouched by an upgrade -- only the installed
+package changes. No re-enrollment is needed.

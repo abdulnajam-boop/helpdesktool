@@ -1,17 +1,22 @@
 [Unit]
 Description=Helpdesktool Linux Endpoint Agent
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/helpdesk-linux-agent --config %h/.config/helpdesktool/agent.json
+User=helpdesk-agent
+Group=helpdesk-agent
+ExecStart=/opt/helpdesktool/venv/bin/helpdesk-linux-agent --config /etc/helpdesktool/agent.json
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%h/.config/helpdesktool
+ProtectHome=true
+ReadWritePaths=/etc/helpdesktool
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

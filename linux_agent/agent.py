@@ -63,6 +63,29 @@ class LinuxAgent:
         self.config.save(self.config_path)
         LOG.info("enrolled device %s", self.config.device_id)
 
+    def enroll_with_token(self, token: str) -> None:
+        """Self-enrollment with a one-time, admin-issued token
+        (``POST /v1/devices/enrollment-tokens``) instead of an authenticated
+        admin session — unlike ``enroll``, this doesn't require ``tenant_id``
+        to already be known: the response supplies it, since the token
+        itself already identifies which tenant this device belongs to. Lets
+        an installer bootstrap a fresh config from nothing but a server URL
+        and a token — see ``deploy/install-linux-agent.sh``.
+        """
+        if self.config.device_id and self.config.agent_token:
+            return
+        result = self.client.enroll_with_token(
+            token, self.config.external_id, socket.gethostname()
+        )
+        self.config.device_id = result["device_id"]
+        self.config.agent_token = result["agent_token"]
+        self.config.tenant_id = result["tenant_id"]
+        if result.get("signing_public_key_pem"):
+            self.config.signing_public_key_pem = result["signing_public_key_pem"]
+            self.config.signing_key_version = result.get("signing_key_version")
+        self.config.save(self.config_path)
+        LOG.info("enrolled device %s via enrollment token", self.config.device_id)
+
     def ensure_signing_key(self) -> None:
         """Trust-on-first-use pinning for agents enrolled before signed job
         envelopes existed, or whose config lost the key some other way. Once
@@ -298,12 +321,53 @@ def main() -> None:
         "--config", type=Path, default=Path.home() / ".config/helpdesktool/agent.json"
     )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="Control plane URL; only needed to bootstrap a config that doesn't exist yet",
+    )
+    parser.add_argument(
+        "--enrollment-token",
+        default=None,
+        help=(
+            "One-time admin-issued token (POST /v1/devices/enrollment-tokens) for "
+            "self-enrollment -- no tenant_id/user_id need to be known upfront"
+        ),
+    )
+    parser.add_argument(
+        "--external-id", default=None, help="Defaults to this host's hostname"
+    )
+    parser.add_argument(
+        "--allowed-services",
+        default=None,
+        help="Comma-separated systemd unit names this agent may restart",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    config = AgentConfig.load(args.config)
+    if args.config.exists():
+        config = AgentConfig.load(args.config)
+    else:
+        if not args.server_url or not args.enrollment_token:
+            raise SystemExit(
+                f"{args.config} does not exist yet; provide --server-url and "
+                "--enrollment-token to bootstrap it (first-run self-enrollment)"
+            )
+        services = (
+            tuple(args.allowed_services.split(",")) if args.allowed_services else ()
+        )
+        config = AgentConfig(
+            server_url=args.server_url,
+            external_id=args.external_id or socket.gethostname(),
+            tenant_id="",
+            user_id="",
+            allowed_services=services,
+            monitored_services=services,
+        )
     agent = LinuxAgent(config, args.config)
+    if args.enrollment_token and not (config.device_id and config.agent_token):
+        agent.enroll_with_token(args.enrollment_token)
     while True:
         try:
             agent.run_once()

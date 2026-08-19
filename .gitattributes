@@ -1,0 +1,7 @@
+# Shell scripts and systemd units must always check out with LF line
+# endings, regardless of the cloning machine's core.autocrlf setting --
+# a CRLF shebang line ("#!/usr/bin/env bash\r") fails on Linux with
+# "bad interpreter: ... no such file or directory". These are deployed to
+# and run on Linux targets even when authored/committed from Windows.
+*.sh text eol=lf
+deploy/*.service text eol=lf

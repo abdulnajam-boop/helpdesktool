@@ -54,6 +54,28 @@ class ControlPlaneClient:
             ),
         )
 
+    def enroll_with_token(
+        self, enrollment_token: str, external_id: str, hostname: str
+    ) -> dict[str, Any]:
+        """Self-enrollment with a one-time, admin-issued token instead of an
+        authenticated admin session — no tenant_id needs to be known
+        upfront; the response includes it (see
+        helpdesktool.api.enroll_device_with_token).
+        """
+        return cast(
+            dict[str, Any],
+            self.request(
+                "POST",
+                "/v1/devices/enroll-with-token",
+                payload={
+                    "external_id": external_id,
+                    "hostname": hostname,
+                    "os": "linux",
+                },
+                headers={"X-Enrollment-Token": enrollment_token},
+            ),
+        )
+
     @staticmethod
     def agent_headers(token: str, idempotency_key: str | None = None) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {token}"}

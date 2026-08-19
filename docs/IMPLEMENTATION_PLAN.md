@@ -1136,6 +1136,106 @@ Linux agent — proven by tests, not just by symmetry with the Linux code.
 
 ---
 
+### Cross-cutting: agent installers and token-based self-enrollment (DONE, 2026-08-20)
+
+Real, tested installers for both agents, closing the gap between "the agent
+code exists" and "a customer can actually install it with minimal
+interaction" -- the original goal for this piece of work.
+
+**A real gap found by auditing, not by review:** `enroll_device_with_token`
+existed and worked over raw HTTP, but no agent code ever called it — the
+Windows README's own enrollment section admitted this, describing it as
+something an operator would have to `curl` by hand or "extend
+`WindowsAgent.enroll()` to call it directly." Worse, the endpoint's response
+didn't even include `tenant_id` — needed by `execute_job`'s envelope
+verification (`expected_tenant_id=self.config.tenant_id`) — so even a
+hand-rolled caller of that endpoint couldn't have produced a working agent
+config. Token-based self-enrollment was documented but non-functional.
+
+**What was actually built:**
+- `enroll_device_with_token`'s response now includes `tenant_id` (not
+  secret; the device is already bound to that tenant server-side) so a
+  self-enrolling agent can populate its own config without any tenant
+  identifier known upfront.
+- `LinuxAgent.enroll_with_token(token)` / `WindowsAgent.enroll_with_token(token)`
+  (mirroring the existing admin-mediated `enroll()`) plus
+  `ControlPlaneClient.enroll_with_token` on both agents' HTTP clients.
+- Both agents' CLI (`main()`) now bootstraps a fresh config from nothing but
+  `--server-url`/`--enrollment-token`/`--external-id`/`--allowed-services`
+  when `--config` doesn't exist yet, calling `enroll_with_token` before
+  entering the run loop -- no hand-authored placeholder JSON file needed.
+- `deploy/install-linux-agent.sh` / `deploy/uninstall-linux-agent.sh`: a
+  real installer, not just documentation. Creates a dedicated
+  `helpdesk-agent` system account (`--no-create-home`,
+  `--shell /usr/sbin/nologin`), installs into an isolated venv, checks the
+  Python version upfront with an actionable error instead of an opaque pip
+  failure, enrolls and runs the first heartbeat/inventory cycle as that
+  unprivileged account from the very start (`runuser`, never as root),
+  locks down `/etc/helpdesktool` (`700`/`600`, owned by the service
+  account), and installs `deploy/helpdesk-linux-agent.service` (rewritten
+  from the previous per-user `systemd --user` unit to a real system-level
+  unit — `User=helpdesk-agent`, `ProtectSystem=strict`, empty capability
+  bounding set — since a server endpoint agent needs to run independently
+  of any interactive login session).
+- `deploy/install-windows-agent.ps1` / `deploy/uninstall-windows-agent.ps1`:
+  the PowerShell equivalent. **A real gap found while writing this, not
+  before:** `windows_agent/service.py`'s install command defaults to
+  pywin32's own default of running the service as `LocalSystem` unless
+  `--username`/`--password` are passed explicitly — the existing README's
+  own security guidance ("run as a dedicated, low-privilege service
+  account, not LocalSystem") was therefore not actually enforced by
+  anything. Fixed: the installer explicitly passes
+  `--username "NT SERVICE\HelpdeskWindowsAgent" --password ""` (a Windows
+  virtual service account, no password needed) so the service actually
+  runs under the identity the ACL commands (also automated now) restrict
+  `C:\ProgramData\helpdesktool` to.
+- Packaging honestly scoped: this repository has no published PyPI/private
+  index release, so both installers default to installing from this repo's
+  `main` branch via `pip`'s `git+https` support, with an explicit
+  `--package-source`/`-PackageSource` override documented as the right
+  choice for a real fleet rollout (pin an exact, reviewed version rather
+  than "whatever main currently is").
+- `deploy/README-windows-agent.md`'s "Known limitation" section, describing
+  the durable execution journal as *not yet built*, was stale (the journal
+  was built earlier this pass, in the signed-envelopes milestone) — fixed,
+  and an "Upgrade" section added for both platforms (stop the
+  service/unit, `pip install --upgrade`, start it again; config/credential/
+  journal are untouched, no re-enrollment needed).
+- `README.md`'s "Linux agent" and "Known limitations" sections predated
+  Milestone 2 and had drifted badly out of date (still describing RLS,
+  OIDC, and the Windows agent as not yet built, all of which shipped
+  multiple milestones ago) — rewritten to reflect actual current state, and
+  a "Windows agent" section added (previously only documented in
+  `deploy/README-windows-agent.md`, not discoverable from the top-level
+  README at all).
+- `helpdesk-linux-agent.service` unit change means anyone already running
+  the *previous* `systemd --user` unit from an earlier checkout should
+  re-run the installer (or migrate manually) rather than expecting an
+  in-place unit-file swap to work — this is a deliberate, documented
+  architecture change (per-user unit -> system unit + dedicated service
+  account), not a silent behavior change to paper over.
+**Verification:** this was tested for real, not just written and
+assumed correct. Ran `install-linux-agent.sh` inside a genuine
+systemd-capable container (`jrei/systemd-ubuntu:22.04`, `--privileged`)
+against a real Postgres-backed control-plane container on the same
+Docker network: created a tenant, generated a real enrollment token via
+the API, ran the installer exactly as a customer would, and confirmed
+end-to-end — service account created, Python-version check exercised
+(caught the container's default Python 3.10 being too old, added the
+version-check-with-actionable-error as a direct result), package
+installed, device self-enrolled with `tenant_id` correctly populated
+from the response, signing key pinned, systemd unit installed/enabled/
+started, config file `700`/`600` owned by the unprivileged account, and
+the device showing `"status": "online"` on the real control plane within
+seconds. Then ran `uninstall-linux-agent.sh` and confirmed complete,
+clean removal (unit, service account, install dir, config dir all gone).
+The Windows installer was syntax-validated (PowerShell's own AST parser)
+but not executed end-to-end — no Windows container runtime is available
+in this environment; flagged explicitly rather than claimed as verified
+to the same standard as the Linux path.
+
+---
+
 ### Milestone 6 — Observability, monitoring, and reporting
 
 > **Actual completion status (2026-08-20): PARTIAL.** The backend
