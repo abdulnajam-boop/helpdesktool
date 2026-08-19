@@ -56,11 +56,14 @@ role, which owns the schema.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 APP_ROLE = "helpdesk_app"
 
 TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "users",
     "devices",
+    "enrollment_tokens",
     "device_inventory",
     "heartbeats",
     "tickets",
@@ -130,11 +133,26 @@ def clear_staged_app_role_password_statement() -> str:
     return f"SELECT set_config('{_PASSWORD_HANDOFF_GUC}', '', false)"
 
 
-def provision_app_role_statements() -> list[str]:
+def provision_app_role_statements(
+    tables: Sequence[str], sequences: Sequence[str] = APPLICATION_SEQUENCES
+) -> list[str]:
     """DDL to create (or update the password of) the restricted application
     role and grant it exactly the privileges it needs. Must run after
     ``stage_app_role_password_statement`` has been executed on the same
     connection/transaction. Safe to run more than once (idempotent).
+
+    ``tables`` is a required, explicit argument rather than defaulting to
+    ``TENANT_SCOPED_TABLES``/``UNSCOPED_APPLICATION_TABLES`` on purpose:
+    those constants describe the *current* schema, but a migration must only
+    ever grant on tables that exist as of *that migration* — a later change
+    to those constants (e.g. adding a new tenant-scoped table) must not
+    silently alter what an already-written, already-run migration does the
+    next time it executes against a fresh database. Every migration that
+    calls this must pass its own frozen snapshot of table names. Callers
+    that genuinely want "every tenant-scoped table as of right now" (tests
+    building the full current schema in one shot, not incrementally through
+    migrations) should pass ``(*TENANT_SCOPED_TABLES,
+    *UNSCOPED_APPLICATION_TABLES)`` explicitly.
     """
     create_or_update_role = f"""
     DO $$
@@ -160,27 +178,29 @@ def provision_app_role_statements() -> list[str]:
         f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}",
         *(
             f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {APP_ROLE}"
-            for table in (*TENANT_SCOPED_TABLES, *UNSCOPED_APPLICATION_TABLES)
+            for table in tables
         ),
         *(
             f"GRANT USAGE, SELECT ON SEQUENCE {sequence} TO {APP_ROLE}"
-            for sequence in APPLICATION_SEQUENCES
+            for sequence in sequences
         ),
     ]
     return [create_or_update_role, *grants]
 
 
-def revoke_app_role_statements() -> list[str]:
-    """DDL to fully reverse ``provision_app_role_statements``."""
+def revoke_app_role_statements(
+    tables: Sequence[str], sequences: Sequence[str] = APPLICATION_SEQUENCES
+) -> list[str]:
+    """DDL to fully reverse ``provision_app_role_statements``. See its
+    docstring for why ``tables`` must be an explicit, migration-owned
+    snapshot rather than defaulting to the live constants.
+    """
     return [
         *(
             f"REVOKE ALL ON SEQUENCE {sequence} FROM {APP_ROLE}"
-            for sequence in APPLICATION_SEQUENCES
+            for sequence in sequences
         ),
-        *(
-            f"REVOKE ALL ON {table} FROM {APP_ROLE}"
-            for table in (*TENANT_SCOPED_TABLES, *UNSCOPED_APPLICATION_TABLES)
-        ),
+        *(f"REVOKE ALL ON {table} FROM {APP_ROLE}" for table in tables),
         f"REVOKE USAGE ON SCHEMA public FROM {APP_ROLE}",
         f"DROP ROLE IF EXISTS {APP_ROLE}",
     ]

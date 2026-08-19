@@ -28,6 +28,7 @@ from .db_models import (
     AuditEventRow,
     Device,
     DeviceInventory,
+    EnrollmentToken,
     ExecutionResultRow,
     Heartbeat,
     IdempotencyRecord,
@@ -50,6 +51,8 @@ from .schemas import (
     ActionCreate,
     ApprovalDecision,
     DeviceEnroll,
+    DeviceRevoke,
+    EnrollmentTokenCreate,
     HeartbeatCreate,
     InventoryCreate,
     JobResult,
@@ -302,6 +305,221 @@ def enroll_device(
     )
     session.commit()
     return {"device_id": device.id, "agent_token": token}
+
+
+@app.post("/v1/devices/enrollment-tokens", status_code=201)
+def create_enrollment_token(
+    body: EnrollmentTokenCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + timedelta(minutes=body.ttl_minutes)
+    row = EnrollmentToken(
+        tenant_id=principal.tenant_id,
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        created_by=principal.actor_id,
+        label=body.label,
+        expires_at=expires_at,
+    )
+    session.add(row)
+    session.flush()
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "enrollment_token.created",
+        principal.actor_id,
+        {"label": row.label, "expires_at": expires_at.isoformat()},
+    )
+    session.commit()
+    return {
+        "enrollment_token_id": row.id,
+        "token": token,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@app.get("/v1/devices/enrollment-tokens")
+def list_enrollment_tokens(
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(EnrollmentToken)
+        .where(EnrollmentToken.tenant_id == principal.tenant_id)
+        .order_by(EnrollmentToken.created_at.desc())
+    ).all()
+    now = datetime.now(UTC)
+    return [
+        {
+            "id": row.id,
+            "label": row.label,
+            "created_by": row.created_by,
+            "expires_at": row.expires_at.isoformat(),
+            "used_at": row.used_at.isoformat() if row.used_at else None,
+            "used_by_device_id": row.used_by_device_id,
+            "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+            "status": (
+                "used"
+                if row.used_at
+                else "revoked"
+                if row.revoked_at
+                else "expired"
+                if _aware(row.expires_at) < now
+                else "active"
+            ),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in rows
+    ]
+
+
+@app.delete("/v1/devices/enrollment-tokens/{token_id}", status_code=204)
+def revoke_enrollment_token(
+    token_id: str,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> None:
+    row = tenant_row(session, EnrollmentToken, token_id, principal.tenant_id)
+    row.revoked_at = datetime.now(UTC)
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "enrollment_token.revoked",
+        principal.actor_id,
+        {"label": row.label},
+    )
+    session.commit()
+
+
+@app.post("/v1/devices/enroll-with-token", status_code=201)
+def enroll_device_with_token(
+    body: DeviceEnroll,
+    x_enrollment_token: str = Header(alias="X-Enrollment-Token"),
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    now = datetime.now(UTC)
+    token_hash = hashlib.sha256(x_enrollment_token.encode()).hexdigest()
+    # No tenant is known yet — resolving which tenant this token belongs to
+    # is exactly what this lookup does, the same pattern require_user's
+    # identity-resolution paths use. with_for_update closes the race between
+    # two concurrent uses of the same single-use token.
+    with resolving_identity(session):
+        enrollment = session.scalar(
+            select(EnrollmentToken)
+            .where(EnrollmentToken.token_hash == token_hash)
+            .with_for_update()
+        )
+    if (
+        enrollment is None
+        or enrollment.used_at is not None
+        or enrollment.revoked_at is not None
+        or _aware(enrollment.expires_at) < now
+    ):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "invalid or expired enrollment token"
+        )
+    set_tenant_context(session, enrollment.tenant_id)
+    device_token = secrets.token_urlsafe(32)
+    device = Device(
+        tenant_id=enrollment.tenant_id,
+        external_id=body.external_id,
+        hostname=body.hostname,
+        os=body.os,
+        agent_key_hash=hashlib.sha256(device_token.encode()).hexdigest(),
+    )
+    session.add(device)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "device already enrolled"
+        ) from exc
+    enrollment.used_at = now
+    enrollment.used_by_device_id = device.id
+    audit(
+        session,
+        enrollment.tenant_id,
+        device.id,
+        "device.enrolled",
+        f"enrollment-token:{enrollment.id}",
+        {"hostname": device.hostname, "os": device.os, "via": "enrollment_token"},
+    )
+    session.commit()
+    return {"device_id": device.id, "agent_token": device_token}
+
+
+@app.post("/v1/devices/{device_id}/rotate-credential")
+def rotate_device_credential(
+    device_id: str,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    device = tenant_row(session, Device, device_id, principal.tenant_id)
+    if not device.active:
+        raise HTTPException(status.HTTP_409_CONFLICT, "device is revoked")
+    token = secrets.token_urlsafe(32)
+    device.agent_key_hash = hashlib.sha256(token.encode()).hexdigest()
+    device.credential_rotated_at = datetime.now(UTC)
+    audit(
+        session,
+        principal.tenant_id,
+        device.id,
+        "device.credential_rotated",
+        principal.actor_id,
+        {"via": "admin"},
+    )
+    session.commit()
+    return {"device_id": device.id, "agent_token": token}
+
+
+@app.post("/v1/devices/{device_id}/credential/renew")
+def renew_device_credential(
+    device_id: str,
+    principal: Principal = Depends(require_agent),
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    # require_agent already authenticated the device's current credential
+    # and confirmed it is active before this handler runs.
+    device = tenant_row(session, Device, device_id, principal.tenant_id)
+    token = secrets.token_urlsafe(32)
+    device.agent_key_hash = hashlib.sha256(token.encode()).hexdigest()
+    device.credential_rotated_at = datetime.now(UTC)
+    audit(
+        session,
+        principal.tenant_id,
+        device.id,
+        "device.credential_rotated",
+        device.id,
+        {"via": "self_service"},
+    )
+    session.commit()
+    return {"device_id": device.id, "agent_token": token}
+
+
+@app.post("/v1/devices/{device_id}/revoke")
+def revoke_device(
+    device_id: str,
+    body: DeviceRevoke,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    device = tenant_row(session, Device, device_id, principal.tenant_id)
+    device.active = False
+    device.revoked_at = datetime.now(UTC)
+    device.revoked_reason = body.reason
+    audit(
+        session,
+        principal.tenant_id,
+        device.id,
+        "device.revoked",
+        principal.actor_id,
+        {"reason": body.reason},
+    )
+    session.commit()
+    return device_json(device)
 
 
 @app.post("/v1/devices/{device_id}/heartbeat")
@@ -1352,6 +1570,12 @@ def device_json(row: Device) -> dict[str, Any]:
         "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
         "status": "online" if online else "offline",
         "agent_status": "connected" if online else "disconnected",
+        "active": row.active,
+        "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+        "revoked_reason": row.revoked_reason,
+        "credential_rotated_at": (
+            row.credential_rotated_at.isoformat() if row.credential_rotated_at else None
+        ),
     }
 
 

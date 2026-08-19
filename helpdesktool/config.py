@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
+    lease_reaper_max_attempts: int = 3
+    lease_reaper_poll_seconds: float = 15.0
 
     @property
     def allowed_services(self) -> frozenset[str]:

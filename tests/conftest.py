@@ -18,6 +18,7 @@ from helpdesktool.database import Base, get_session, reset_tenant_context
 from helpdesktool.oidc import OIDCVerifier
 from helpdesktool.rls import (
     TENANT_SCOPED_TABLES,
+    UNSCOPED_APPLICATION_TABLES,
     clear_staged_app_role_password_statement,
     enable_statements,
     provision_app_role_statements,
@@ -93,7 +94,9 @@ def _provision_rls_schema_and_role(superuser_engine: Engine) -> str:
             text(stage_app_role_password_statement()),
             {"password": TEST_APP_ROLE_PASSWORD},
         )
-        for statement in provision_app_role_statements():
+        for statement in provision_app_role_statements(
+            (*TENANT_SCOPED_TABLES, *UNSCOPED_APPLICATION_TABLES)
+        ):
             connection.execute(text(statement))
         connection.execute(text(clear_staged_app_role_password_statement()))
     return Settings(

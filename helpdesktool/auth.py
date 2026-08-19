@@ -196,7 +196,11 @@ def require_agent(
     with resolving_identity(session):
         device = session.get(Device, device_id)
     supplied = hashlib.sha256(authorization[7:].encode()).hexdigest()
-    if device is None or not hmac.compare_digest(device.agent_key_hash, supplied):
+    if (
+        device is None
+        or not device.active
+        or not hmac.compare_digest(device.agent_key_hash, supplied)
+    ):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid agent credentials")
     set_tenant_context(session, device.tenant_id)
     return Principal(device.tenant_id, device.id, "agent")
