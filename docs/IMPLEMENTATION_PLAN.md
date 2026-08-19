@@ -790,6 +790,28 @@ actionable again within one lease window.
 
 ---
 
+### Cross-cutting: end-to-end smoke test (DONE, 2026-08-19)
+
+`tests/test_e2e_smoke.py` — one test exercising the entire documented lifecycle
+through the real HTTP API in production-mode (real PostgreSQL with RLS enforced
+via the actual restricted role, OIDC-only auth, insecure headers and dev login
+both disabled): tenant → user → one-time-token device enrollment → low-disk
+telemetry → deterministic incident detection → incident correlated to a ticket →
+operator-proposed `service.restart` remediation → policy evaluation (medium risk
+→ approval required) → self-approval rejected (separation of duties) →
+independent admin approval → job dispatch → agent claim → agent execution
+(the real `linux_agent.executor.ServiceRestartExecutor` against a fake
+`systemctl`, not a mock of the executor itself) → verified result → recovery
+telemetry resolves the incident and ticket → hash-chained audit trail queryable
+by correlation id on both the incident and the action → dashboard counts reflect
+everything that happened. **Passed on the first real run** — this is the
+strongest evidence in the repository that Milestones 1-3's work actually
+composes into a working product end to end, not just in isolation per-milestone.
+Directly satisfies Definition-of-Done items 1-19 as a single, repeatable,
+CI-enforced proof rather than a manual checklist.
+
+---
+
 ### Milestone 4 — Versioned, signed remediation skill registry
 
 **Build:**
