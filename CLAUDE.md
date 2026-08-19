@@ -40,6 +40,7 @@ npm install
 npm run dev          # vite dev server, host 0.0.0.0
 npm run build         # tsc -b && vite build
 npm run typecheck     # tsc -b only
+npm test              # vitest run
 ```
 
 Full stack via Docker Compose (preferred for end-to-end/manual testing):
@@ -51,9 +52,10 @@ docker compose up --build
 
 Compose brings up Postgres, runs Alembic migrations, idempotently seeds the Acme demo tenant, starts the API + webhook worker, then the frontend once the API health check passes. `docker compose down` preserves the named Postgres volume; add `-v` to destroy and reset demo data.
 
-CI (`.github/workflows/ci.yml`) runs, as two independent jobs:
+CI (`.github/workflows/ci.yml`) runs, as three independent jobs:
 - backend: `python -m compileall`, `ruff check .`, `ruff format --check .`, `mypy`, `pytest`
-- frontend: `npm install && npm run build` (in `frontend/`)
+- frontend: `npm install`, `npm run typecheck`, `npm test`, `npm run build` (in `frontend/`)
+- docker: builds the API and frontend Docker images and runs each one for real (curls `/health/live` / `/`) — catches import/startup failures a plain `docker build` can't; see `CLAUDE.md`'s Frontend section for the real bug this caught.
 
 Run the equivalent locally before considering backend or frontend work done.
 
@@ -136,7 +138,10 @@ Mirrors `linux_agent/`'s exact contract (same `AgentConfig` shape, same `Control
 
 ### Frontend (`frontend/`)
 
-Single-page app in `frontend/src/main.tsx` covering Dashboard, Devices, Tickets, Incidents, Actions, Approvals, Audit, Integrations, and Settings, talking to the API via `frontend/src/api.ts`. The UI hides controls that don't apply to the current role (Owner/Admin/Operator/Viewer), but FastAPI authorization is authoritative and returns 403 for prohibited writes regardless of what the UI shows.
+Single-page app, `frontend/src/main.tsx` bootstrapping `App.tsx` (shell/routing/session state), covering Dashboard, Devices, Tickets, Incidents (incl. an AI-diagnosis panel, Milestone 9), Actions, Approvals, Skills (Milestone 9), Audit, Integrations, and Settings — one file per section under `pages/`, shared primitives in `components.tsx`, talking to the API via `frontend/src/api.ts`. The UI hides controls that don't apply to the current role (Owner/Admin/Operator/Viewer), but FastAPI authorization is authoritative and returns 403 for prohibited writes regardless of what the UI shows.
+- `auth/oidc.ts` — a real, provider-neutral OIDC Authorization Code + PKCE flow for a public SPA client (no client secret — the correct pattern per RFC 8252/OAuth 2.0 Security BCP for a browser app). Uses standard `.well-known/openid-configuration` discovery rather than hardcoding any vendor's endpoints. Configured entirely via build-time Vite env vars (`VITE_OIDC_ISSUER`/`VITE_OIDC_CLIENT_ID`/...; see `.env.example`) — unset (the default) leaves the pre-existing development login page active, both paths use the same `helpdesk_session` localStorage slot so `App.tsx`'s session-restore logic doesn't need to know which one was used. `auth/oidc.test.ts` verifies the PKCE code-challenge derivation against the published RFC 7636 Appendix B test vector.
+- `npm test` (Vitest + jsdom) is wired into `.github/workflows/ci.yml`'s frontend job alongside `npm run typecheck`.
+- **`.github/workflows/ci.yml` also has a `docker` job** that builds both the API and frontend Docker images and actually runs each one (curling `/health/live` / `/`), not just `docker build`ing them — added after discovering the real `api` container had been crash-looping in production since the signed-job-envelopes milestone (the `Dockerfile` never `COPY`'d the new `agent_common/` package `helpdesktool/job_signing.py` imports at startup; every `pip install -e .`-based test run that whole session used a full repo checkout and never hit this). If you add a new top-level package `helpdesktool` imports, it must be added to `Dockerfile`'s `COPY` list too — this CI job is what actually catches that now.
 
 ### Data flow / safety invariants to preserve
 
@@ -149,7 +154,7 @@ Single-page app in `frontend/src/main.tsx` covering Dashboard, Devices, Tickets,
 
 ### Known deferred/limited areas (see README "Known limitations")
 
-- Production human auth is OIDC (`helpdesktool/oidc.py` + `auth.py`), and tenant isolation is enforced by PostgreSQL Row-Level Security (`helpdesktool/rls.py`, migration `0005`) in addition to application-level filtering — both as of Milestone 2. There is still no frontend OIDC login UI; the browser can currently only authenticate via the development login page, which remains development-only.
+- Production human auth is OIDC (`helpdesktool/oidc.py` + `auth.py`), and tenant isolation is enforced by PostgreSQL Row-Level Security (`helpdesktool/rls.py`, migration `0005`) in addition to application-level filtering — both as of Milestone 2. **A frontend OIDC login UI now exists** (`frontend/src/auth/oidc.ts`, Milestone 9) — Authorization Code + PKCE, provider-neutral via standard discovery, build-time configured. Not done: the frontend doesn't yet independently enforce role-based route visibility beyond what already existed (backend authorization remains authoritative either way), and there's no logout-triggered IdP session termination (RP-initiated logout) — sign-out only clears the local token.
 - Device credentials can be rotated (admin-initiated or agent self-service) and revoked, and devices can self-enroll with a one-time admin-issued token (`helpdesktool/api.py`'s `/v1/devices/enrollment-tokens*`/`enroll-with-token` endpoints) — as of Milestone 3. **Signed, versioned job envelopes and a durable agent-side execution journal are now implemented** (`agent_common/signing.py`, `agent_common/journal.py`, `helpdesktool/job_signing.py`) — see Milestone 3's "Endpoint trust hardening" note in `docs/IMPLEMENTATION_PLAN.md`. mTLS itself (certificate-based transport identity, as opposed to the bearer-token device credential + envelope signature that exist today) is still not implemented — evaluated and deliberately deferred; see the same doc section for why.
 - No generic disk-cleanup skill exists by design — only `service.restart` as a reference mutating executor.
 - **Abandoned job claims now recover.** `helpdesktool/lease_reaper.py` (Milestone 3, `helpdesk-lease-reaper` entry point/Compose service) requeues or escalates any `Action` whose claim lease expired without a result being reported — previously (documented here as a known gap through Milestone 2) such a job stayed `claimed` forever with no operator-visible signal.

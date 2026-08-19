@@ -1391,6 +1391,97 @@ CI-gated container pipeline — not just `docker compose up` on a laptop.
 
 ### Milestone 9 — Frontend modernization and test coverage
 
+> **Actual completion status (2026-08-20): PARTIAL.** File-per-page
+> modularization, a real test framework wired into CI, and (pulled forward
+> from this repo's "production auth" gap, since it's inseparable from doing
+> real frontend auth work at all) a genuine OIDC Authorization Code + PKCE
+> login flow are done. **Not done in this pass:** React Testing Library /
+> component-level route tests (only the new OIDC/PKCE logic has unit tests
+> — see below for why that was the higher-priority slice) and an
+> accessibility pass.
+>
+> **What was actually built:**
+> - `frontend/src/main.tsx` split into `App.tsx` (shell/routing/session
+>   state), `auth/` (login, OIDC, callback), `pages/*.tsx` (one file per nav
+>   section), `components.tsx` (shared UI primitives — `Badge`, `Status`,
+>   `Table`, `Timeline`, `SearchablePage`, ...), `hooks.ts`, `types.ts`. Page
+>   *content* is unchanged from the pre-existing, already-functional
+>   implementation (real API calls, not mocked) — this was a structural
+>   refactor, not a rewrite, per the explicit "keep existing functionality"
+>   instruction.
+> - `frontend/src/auth/oidc.ts`: a real, provider-neutral OIDC
+>   Authorization Code + PKCE flow for a public SPA client (no client
+>   secret — RFC 8252/OAuth 2.0 Security BCP's correct pattern for a
+>   browser app, not a shortcut). `discover()` uses standard
+>   `.well-known/openid-configuration` discovery rather than hardcoding any
+>   vendor's authorize/token endpoint paths, keeping this as
+>   provider-neutral as the backend's own `helpdesktool/oidc.py`. Configured
+>   entirely via build-time Vite env vars (`VITE_OIDC_ISSUER`,
+>   `VITE_OIDC_CLIENT_ID`, ...) — see `.env.example` and
+>   `frontend/Dockerfile`/`compose.yaml`'s new build args. Left every one of
+>   them unset (the default) and the login page falls back to the existing
+>   development login exactly as before — this is additive, nothing about
+>   the existing dev-login path changed.
+> - `frontend/src/auth/oidc.test.ts` (9 cases, Vitest): `generateCodeChallenge`
+>   verified against the **published RFC 7636 Appendix B test vector**
+>   (`dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk` -> exactly
+>   `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`) — the strongest evidence
+>   available that the PKCE implementation is spec-correct, not just
+>   plausible-looking. Also covers: state/nonce CSRF rejection (wrong state,
+>   missing state), identity-provider error surfacing, missing-code
+>   rejection, and a full mocked discovery + token-exchange round trip
+>   asserting the exact PKCE parameters sent. This was judged the
+>   higher-priority test investment over broad component rendering tests:
+>   it's the one new piece of frontend logic in this pass with real security
+>   properties to get wrong.
+> - New pages the backend already supported but the frontend never
+>   surfaced: `pages/Skills.tsx` (Milestone 4's registry — list + an
+>   admin-only register-new-version form) and an AI-diagnosis panel folded
+>   into `pages/Incidents.tsx`'s incident detail view (Milestone 7's
+>   `POST /v1/incidents/{id}/diagnose` and the `diagnoses` array
+>   `GET /v1/incidents/{id}` already returned) — a "Run AI diagnosis" button
+>   and a list of past diagnoses with an explicit "advisory only, never
+>   auto-executed" note matching the backend's actual trust model.
+> - `vitest` + `jsdom` added as devDependencies, `npm test` wired into
+>   `.github/workflows/ci.yml`'s frontend job (previously only ran
+>   `npm install && npm run build` — `npm test`/`npm run typecheck` were
+>   both missing from CI entirely before this pass).
+> - **A real, previously-shipping-broken bug found by actually running the
+>   production Docker image, not by any of the above:** `Dockerfile` never
+>   copied the `agent_common/` package (added in the signed-job-envelopes
+>   milestone) into the API image, so `helpdesktool/job_signing.py`'s
+>   `from agent_common.signing import canonical_payload` raised
+>   `ModuleNotFoundError` at uvicorn startup — the real `api` container has
+>   been crash-looping since that milestone merged, invisible to every
+>   `pip install -e .`-based test run this whole session (including that
+>   milestone's own validation) because none of them used the actual
+>   Dockerfile. Fixed (`COPY agent_common ./agent_common`), and — the actual
+>   fix for *why this could ship silently* — CI's new `docker` job (below)
+>   now builds both images and runs each one for real, hitting
+>   `/health/live`/`/`, specifically to catch this exact class of bug going
+>   forward.
+> - `.github/workflows/ci.yml`: new `docker` job builds the API and frontend
+>   images and smoke-tests that each container actually starts and serves
+>   traffic (not just that `docker build` succeeds, which would not have
+>   caught the bug above — a build succeeds even when a runtime import
+>   later fails). Verified locally end-to-end before pushing: both images
+>   built, both smoke tests passed, and (separately) a full
+>   `docker compose up` run confirmed the real login -> skills -> incident
+>   -> AI-diagnosis path against a live Postgres-backed stack.
+>
+> **Honest limitation on UI verification:** this session has no browser
+> automation tool available, so "opened it in a browser and clicked
+> through it" per this repo's own UI-testing guidance did not happen.
+> What *did* happen: `tsc -b` (typecheck) clean, `vitest run` clean,
+> `vite build` clean (including inside the real Docker build), a live
+> `docker compose up` stack smoke-tested via `curl`, and the exact
+> HTTP round trips the new UI code depends on (`GET /v1/skills`,
+> `POST /v1/incidents/{id}/diagnose`, `GET /v1/incidents/{id}`'s
+> `diagnoses` field) exercised directly against that live stack and
+> confirmed to return exactly the shape the new components expect. That is
+> strong evidence of correctness, not equivalent to visual confirmation —
+> flag this explicitly rather than claiming full verification.
+
 **Build:**
 - Add a test framework (Vitest + React Testing Library) and cover the existing 9
   routes' happy paths plus the role-gating logic (`canOperate`/`canAdmin`).

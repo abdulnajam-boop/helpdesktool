@@ -55,6 +55,14 @@ services:
       context: ./frontend
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        # All optional/empty by default -- leaves the development login page
+        # active. Set every one of VITE_OIDC_ISSUER/VITE_OIDC_CLIENT_ID in
+        # .env to switch the login page to a real OIDC provider.
+        VITE_OIDC_ISSUER: ${VITE_OIDC_ISSUER:-}
+        VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-}
+        VITE_OIDC_AUDIENCE: ${VITE_OIDC_AUDIENCE:-}
+        VITE_OIDC_REDIRECT_URI: ${VITE_OIDC_REDIRECT_URI:-}
+        VITE_OIDC_SCOPE: ${VITE_OIDC_SCOPE:-}
     ports: ["3000:80"]
     depends_on:
       api:

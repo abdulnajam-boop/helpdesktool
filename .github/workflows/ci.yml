@@ -46,4 +46,42 @@ jobs:
         with:
           node-version: '22'
       - run: npm install
+      - run: npm run typecheck
+      - run: npm test
       - run: npm run build
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the API image
+        run: docker build -t helpdesktool-api:ci .
+      - name: Smoke-test the API image actually starts and serves traffic
+        # Catches import-time/startup failures that a plain `docker build`
+        # can't (a bad COPY list, a missing package -- exactly the class of
+        # bug that let helpdesktool/job_signing.py's `agent_common` import
+        # ship broken in the real image while every non-Docker test passed).
+        # /health/live deliberately touches no database, so no DB service is
+        # needed here -- it only needs the app to import and uvicorn to bind.
+        run: |
+          docker run -d --name api-smoke -p 8000:8000 helpdesktool-api:ci
+          ok=""
+          for _ in $(seq 1 20); do
+            if curl -fs http://localhost:8000/health/live >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs api-smoke
+          docker rm -f api-smoke
+          [ -n "$ok" ] || (echo "API container never became healthy" && exit 1)
+      - name: Build the frontend image
+        run: docker build -t helpdesktool-frontend:ci ./frontend
+      - name: Smoke-test the frontend image serves the app
+        run: |
+          docker run -d --name frontend-smoke -p 3000:80 helpdesktool-frontend:ci
+          ok=""
+          for _ in $(seq 1 20); do
+            if curl -fs http://localhost:3000/ >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs frontend-smoke
+          docker rm -f frontend-smoke
+          [ -n "$ok" ] || (echo "frontend container never became healthy" && exit 1)
