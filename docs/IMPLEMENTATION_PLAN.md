@@ -653,6 +653,29 @@ way to authenticate via the browser today); an invitation/user-provisioning flow
 endpoint — the multi-tenant-email disambiguation path was tested using this same
 direct-creation pattern); agent mTLS/credential rotation (explicitly Milestone 3).
 
+**A third "works locally, fails in real CI" bug, found by actually pushing and
+checking, not by re-reasoning:** the first push of this milestone's commit failed
+CI's `pytest` step with exit code 4 (pytest's usage-error code, not a test
+failure). Every local run this whole milestone used `python -m pytest`, which
+inserts the current directory onto `sys.path`; CI's `ci.yml` (unchanged, present
+since before this milestone) invokes the bare `pytest` entry point, which does
+not do that the same way. `tests/conftest.py` and `tests/test_dev_login_postgres.py`
+both use `from tests.support import ...`/`from tests.conftest import ...` —
+absolute imports treating `tests/` as a package — which only resolved by
+accident locally. Root-caused by reproducing the *exact* CI environment: a real
+`python:3.13` Linux container (CI's Python version, and the container base
+matters here — this bug does not reproduce on Windows/Python 3.12 even in a
+freshly created, dependency-clean virtualenv) on a shared Docker network with a
+real Postgres container, running the literal `pytest` command CI runs, which
+reproduced `ModuleNotFoundError: No module named 'tests'` immediately. Fixed
+with the standard, documented pytest mechanism for exactly this situation:
+`pythonpath = ["."]` under `[tool.pytest.ini_options]` in `pyproject.toml`,
+which adds the project root to `sys.path` regardless of how pytest is invoked.
+Re-verified in the same disposable Linux/Python-3.13/real-Postgres container
+after the fix: **67 passed** (all tests, including the 3 that only run on
+Linux — this was the first time this session saw all 67 green in one run,
+since local Windows runs always skip 3 and CI hadn't gone green yet).
+
 ---
 
 ### Milestone 3 — Agent/job trust hardening and durable job lifecycle
