@@ -4,6 +4,7 @@ RUN addgroup --system helpdesk && adduser --system --ingroup helpdesk helpdesk
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY helpdesktool ./helpdesktool
+COPY agent_common ./agent_common
 COPY linux_agent ./linux_agent
 COPY alembic.ini ./
 COPY migrations ./migrations

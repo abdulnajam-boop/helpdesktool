@@ -1,3 +1,8 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
-export default defineConfig({plugins:[react()],server:{port:3000},build:{outDir:'dist'}})
+export default defineConfig({
+  plugins: [react()],
+  server: { port: 3000 },
+  build: { outDir: 'dist' },
+  test: { environment: 'jsdom', pool: 'threads' },
+})
