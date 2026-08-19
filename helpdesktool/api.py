@@ -13,6 +13,7 @@ from sqlalchemy import CursorResult, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .ai.provider import diagnose_with_fallback, get_ai_provider
 from .auth import (
     Principal,
     require_agent,
@@ -28,6 +29,7 @@ from .db_models import (
     AuditEventRow,
     Device,
     DeviceInventory,
+    Diagnosis,
     EnrollmentToken,
     ExecutionResultRow,
     Heartbeat,
@@ -861,6 +863,81 @@ def get_incident(
         correlations.add(row.ticket_id)
     correlations.update(item["id"] for item in result["actions"])
     result["timeline"] = _audit_for(session, principal.tenant_id, correlations)
+    result["diagnoses"] = [
+        diagnosis_json(item)
+        for item in session.scalars(
+            select(Diagnosis)
+            .where(
+                Diagnosis.tenant_id == principal.tenant_id,
+                Diagnosis.incident_id == row.id,
+            )
+            .order_by(Diagnosis.created_at.desc())
+        ).all()
+    ]
+    return result
+
+
+@app.post("/v1/incidents/{incident_id}/diagnose", status_code=201)
+def diagnose_incident(
+    incident_id: str,
+    principal: Principal = Depends(require_roles("owner", "admin", "operator")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    incident = tenant_row(session, Incident, incident_id, principal.tenant_id)
+    settings = get_settings()
+    evidence = {
+        "incident_type": incident.incident_type,
+        "severity": incident.severity,
+        "status": incident.status,
+        "device_id": incident.device_id,
+        "occurrence_count": incident.occurrence_count,
+        "summary": incident.summary,
+        "evidence": incident.evidence,
+    }
+    provider = get_ai_provider(
+        base_url=settings.ai_provider_base_url,
+        api_key=settings.ai_provider_api_key,
+        model=settings.ai_provider_model,
+        allowed_skill_ids=tuple(skill.skill_id for skill in SKILLS),
+        timeout_seconds=settings.ai_timeout_seconds,
+        max_retries=settings.ai_max_retries,
+    )
+    diagnosis = diagnose_with_fallback(provider, evidence)
+    proposal = diagnosis.proposal
+    row = Diagnosis(
+        tenant_id=principal.tenant_id,
+        incident_id=incident.id,
+        requested_by=principal.actor_id,
+        provider_name=diagnosis.provider_name,
+        model=diagnosis.model,
+        fallback_used=diagnosis.fallback_used,
+        summary=proposal.summary,
+        likely_root_cause=proposal.likely_root_cause,
+        confidence=proposal.confidence,
+        suggested_skill_id=proposal.suggested_skill_id,
+        suggested_parameters=proposal.suggested_parameters,
+        escalate=proposal.escalate,
+        escalation_reason=proposal.escalation_reason,
+        latency_ms=diagnosis.latency_ms,
+    )
+    session.add(row)
+    session.flush()
+    audit(
+        session,
+        principal.tenant_id,
+        incident.id,
+        "incident.diagnosed",
+        principal.actor_id,
+        {
+            "diagnosis_id": row.id,
+            "provider": diagnosis.provider_name,
+            "fallback_used": diagnosis.fallback_used,
+            "suggested_skill_id": proposal.suggested_skill_id,
+            "escalate": proposal.escalate,
+        },
+    )
+    result = diagnosis_json(row)
+    session.commit()
     return result
 
 
@@ -1609,6 +1686,26 @@ def action_json(row: Action) -> dict[str, Any]:
         ),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def diagnosis_json(row: Diagnosis) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "incident_id": row.incident_id,
+        "requested_by": row.requested_by,
+        "provider_name": row.provider_name,
+        "model": row.model,
+        "fallback_used": row.fallback_used,
+        "summary": row.summary,
+        "likely_root_cause": row.likely_root_cause,
+        "confidence": row.confidence,
+        "suggested_skill_id": row.suggested_skill_id,
+        "suggested_parameters": row.suggested_parameters,
+        "escalate": row.escalate,
+        "escalation_reason": row.escalation_reason,
+        "latency_ms": row.latency_ms,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
 

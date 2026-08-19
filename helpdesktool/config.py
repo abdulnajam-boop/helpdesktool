@@ -32,6 +32,25 @@ class Settings(BaseSettings):
     oidc_jwks_url: str = ""
     lease_reaper_max_attempts: int = 3
     lease_reaper_poll_seconds: float = 15.0
+    # All empty by default on purpose: the platform must fully function with
+    # no AI provider configured at all (helpdesktool.ai falls back to a
+    # deterministic, non-network summary — see ai_configured below and
+    # helpdesktool/ai/provider.py's module docstring for the full trust
+    # model). Any OpenAI-compatible endpoint works; nothing here is tied to
+    # a specific vendor.
+    ai_provider_base_url: str = ""
+    ai_provider_api_key: str = ""
+    ai_provider_model: str = ""
+    ai_timeout_seconds: float = 20.0
+    ai_max_retries: int = 1
+
+    @property
+    def ai_configured(self) -> bool:
+        return bool(
+            self.ai_provider_base_url
+            and self.ai_provider_api_key
+            and self.ai_provider_model
+        )
 
     @property
     def allowed_services(self) -> frozenset[str]:

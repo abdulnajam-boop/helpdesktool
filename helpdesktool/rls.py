@@ -68,6 +68,7 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "heartbeats",
     "tickets",
     "incidents",
+    "diagnoses",
     "actions",
     "approvals",
     "execution_results",

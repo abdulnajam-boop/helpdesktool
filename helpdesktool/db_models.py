@@ -8,6 +8,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -225,6 +226,38 @@ class Approval(Base):
     decision: Mapped[str] = mapped_column(String(20))
     reason: Mapped[str | None] = mapped_column(Text)
     decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Diagnosis(Base):
+    """A stored AI (or deterministic-fallback) diagnosis proposal for an
+    incident. Advisory only: a row here is never turned into an ``Action``
+    automatically — see ``helpdesktool/ai/provider.py``'s module docstring
+    for the full trust model.
+    """
+
+    __tablename__ = "diagnoses"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    incident_id: Mapped[str] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"), index=True
+    )
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    provider_name: Mapped[str] = mapped_column(String(100))
+    model: Mapped[str] = mapped_column(String(200))
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    summary: Mapped[str] = mapped_column(Text)
+    likely_root_cause: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    suggested_skill_id: Mapped[str | None] = mapped_column(String(200))
+    suggested_parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    escalate: Mapped[bool] = mapped_column(Boolean, default=False)
+    escalation_reason: Mapped[str] = mapped_column(Text, default="")
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
