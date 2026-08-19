@@ -39,9 +39,9 @@ class ControlPlaneClient:
 
     def enroll(
         self, tenant_id: str, user_id: str, external_id: str, hostname: str
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         return cast(
-            dict[str, str],
+            dict[str, Any],
             self.request(
                 "POST",
                 "/v1/devices/enroll",

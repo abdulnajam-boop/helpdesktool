@@ -30,6 +30,60 @@ def generate_test_keypair() -> tuple[Any, Any]:
     return private_key, private_key.public_key()
 
 
+TEST_JOB_SIGNING_SEED = "test-job-signing-seed"
+
+
+def agent_signing_public_key_pem() -> str:
+    from helpdesktool.job_signing import public_key_pem
+
+    return public_key_pem(TEST_JOB_SIGNING_SEED)
+
+
+def build_signed_job_envelope(
+    *,
+    action_id: str = "action-1",
+    device_id: str = "device-1",
+    tenant_id: str = "tenant-1",
+    skill_id: str = "service.restart",
+    skill_version: int = 1,
+    parameters: dict[str, Any] | None = None,
+    device_os: str = "linux",
+    attempt: int = 1,
+    claim_token: str = "claim-token",
+    issued_at: datetime | None = None,
+    expires_at: datetime | None = None,
+    nonce: str = "test-nonce",
+    key_version: int = 1,
+    seed_secret: str = TEST_JOB_SIGNING_SEED,
+) -> dict[str, Any]:
+    """Builds a genuinely-signed job envelope for agent-side unit tests, so
+    those tests exercise the real ``agent_common.signing.verify_envelope``
+    path rather than a hand-rolled stand-in.
+    """
+    from helpdesktool.job_signing import sign_envelope
+
+    now = datetime.now(UTC)
+    envelope: dict[str, Any] = {
+        "job_id": f"{action_id}:{attempt}",
+        "action_id": action_id,
+        "device_id": device_id,
+        "tenant_id": tenant_id,
+        "skill_id": skill_id,
+        "skill_version": skill_version,
+        "parameters": parameters or {},
+        "device_os": device_os,
+        "issued_at": (issued_at or now).isoformat(),
+        "expires_at": (expires_at or now + timedelta(minutes=1)).isoformat(),
+        "nonce": nonce,
+        "key_version": key_version,
+    }
+    envelope["signature"] = sign_envelope(envelope, seed_secret)
+    envelope["claim_token"] = claim_token
+    envelope["attempt"] = attempt
+    envelope["lease_expires_at"] = envelope["expires_at"]
+    return envelope
+
+
 def mint_token(
     private_key: Any,
     *,

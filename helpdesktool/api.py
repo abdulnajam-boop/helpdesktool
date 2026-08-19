@@ -46,6 +46,7 @@ from .development_auth import issue_session
 from .events import EventType
 from .incidents import detect_inventory_incidents, incident_json
 from .integrations import validate_webhook_url
+from .job_signing import CURRENT_KEY_VERSION, public_key_pem, sign_envelope
 from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
@@ -328,7 +329,7 @@ def enroll_device(
     body: DeviceEnroll,
     principal: Principal = Depends(require_roles("owner", "admin")),
     session: Session = Depends(get_session),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     token = secrets.token_urlsafe(32)
     device = Device(
         tenant_id=principal.tenant_id,
@@ -353,7 +354,12 @@ def enroll_device(
         {"hostname": device.hostname, "os": device.os},
     )
     session.commit()
-    return {"device_id": device.id, "agent_token": token}
+    return {
+        "device_id": device.id,
+        "agent_token": token,
+        "signing_public_key_pem": public_key_pem(get_settings().job_signing_seed),
+        "signing_key_version": CURRENT_KEY_VERSION,
+    }
 
 
 @app.post("/v1/devices/enrollment-tokens", status_code=201)
@@ -448,7 +454,7 @@ def enroll_device_with_token(
     body: DeviceEnroll,
     x_enrollment_token: str = Header(alias="X-Enrollment-Token"),
     session: Session = Depends(get_session),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     now = datetime.now(UTC)
     token_hash = hashlib.sha256(x_enrollment_token.encode()).hexdigest()
     # No tenant is known yet — resolving which tenant this token belongs to
@@ -497,7 +503,12 @@ def enroll_device_with_token(
         {"hostname": device.hostname, "os": device.os, "via": "enrollment_token"},
     )
     session.commit()
-    return {"device_id": device.id, "agent_token": device_token}
+    return {
+        "device_id": device.id,
+        "agent_token": device_token,
+        "signing_public_key_pem": public_key_pem(get_settings().job_signing_seed),
+        "signing_key_version": CURRENT_KEY_VERSION,
+    }
 
 
 @app.post("/v1/devices/{device_id}/rotate-credential")
@@ -1280,6 +1291,23 @@ def get_action(
     return result
 
 
+@app.get("/v1/devices/{device_id}/signing-key")
+def agent_signing_key(
+    device_id: str,
+    principal: Principal = Depends(require_agent),
+) -> dict[str, Any]:
+    """Lets an already-enrolled agent (re)fetch the current job-signing
+    public key via trust-on-first-use, for agents enrolled before this
+    endpoint existed or that need to re-pin after clearing a stale key. New
+    enrollments get this directly in their enrollment response instead —
+    see ``enroll_device``/``enroll_device_with_token``.
+    """
+    return {
+        "key_version": CURRENT_KEY_VERSION,
+        "public_key_pem": public_key_pem(get_settings().job_signing_seed),
+    }
+
+
 @app.get("/v1/devices/{device_id}/jobs")
 def poll_jobs(
     device_id: str,
@@ -1317,9 +1345,20 @@ def claim_job(
             "claim_token": _claim_token(action_id, cached["attempt"], idempotency_key),
         }
     current = session.get(Action, action_id)
+    if current is not None and current.tenant_id == principal.tenant_id:
+        manifest = get_active_manifest(session, current.skill_id)
+        if manifest is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "skill is no longer registered; job cannot be claimed",
+            )
+        skill_version = manifest.version
+    else:
+        skill_version = 0
     next_attempt = 1 if current is None else current.attempt + 1
     token = _claim_token(action_id, next_attempt, idempotency_key)
     now = datetime.now(UTC)
+    expires_at = now + timedelta(seconds=60)
     changed = cast(
         CursorResult[Any],
         session.execute(
@@ -1334,7 +1373,7 @@ def claim_job(
                 status="claimed",
                 claim_token_hash=hashlib.sha256(token.encode()).hexdigest(),
                 claimed_at=now,
-                lease_expires_at=now + timedelta(seconds=60),
+                lease_expires_at=expires_at,
                 attempt=Action.attempt + 1,
             )
         ),
@@ -1346,12 +1385,24 @@ def claim_job(
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "claimed job vanished unexpectedly"
         )
-    result = {
-        "id": row.id,
+    envelope: dict[str, Any] = {
+        "job_id": f"{row.id}:{row.attempt}",
+        "action_id": row.id,
+        "device_id": row.device_id,
+        "tenant_id": principal.tenant_id,
         "skill_id": row.skill_id,
+        "skill_version": skill_version,
         "parameters": row.parameters,
         "device_os": row.device_os,
-        "device_id": row.device_id,
+        "issued_at": now.isoformat(),
+        "expires_at": row.lease_expires_at.isoformat(),
+        "nonce": secrets.token_hex(16),
+        "key_version": CURRENT_KEY_VERSION,
+    }
+    envelope["signature"] = sign_envelope(envelope, get_settings().job_signing_seed)
+    result: dict[str, Any] = {
+        **envelope,
+        "id": row.id,
         "attempt": row.attempt,
         "lease_expires_at": row.lease_expires_at.isoformat(),
         "claim_token": token,
@@ -1363,6 +1414,7 @@ def claim_job(
         "execution.claimed",
         device_id,
         {
+            "job_id": envelope["job_id"],
             "attempt": row.attempt,
             "lease_expires_at": result["lease_expires_at"],
             "previous_status": "queued",

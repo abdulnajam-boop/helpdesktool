@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = [
     "alembic>=1.13,<2",
+    "cryptography>=42,<46",
     "fastapi>=0.115,<1",
     "psycopg[binary]>=3.2,<4",
     "pydantic-settings>=2.6,<3",
@@ -43,7 +44,7 @@ Repository = "https://github.com/abdulnajam-boop/helpdesktool.git"
 Issues = "https://github.com/abdulnajam-boop/helpdesktool/issues"
 
 [tool.setuptools.packages.find]
-include = ["helpdesktool*", "linux_agent*", "windows_agent*"]
+include = ["helpdesktool*", "agent_common*", "linux_agent*", "windows_agent*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
@@ -57,4 +58,4 @@ select = ["E4", "E7", "E9", "F", "I"]
 python_version = "3.11"
 platform = "linux"
 strict = true
-packages = ["helpdesktool", "linux_agent"]
+packages = ["helpdesktool", "agent_common", "linux_agent"]

@@ -107,6 +107,40 @@ class ServiceRestartExecutor:
             }
         return self._rollback(service, before, "post-restart verification failed")
 
+    def verify_only(self, service: str) -> dict[str, Any]:
+        """Observes current service state without touching it. Used only to
+        recover from a crash that happened before or during a previous
+        ``execute`` call, where the agent cannot know whether the restart
+        actually ran — see ``agent_common.journal``'s module docstring.
+        Never restarts or rolls back; a service found unhealthy here is
+        reported as a failure for an operator to triage, not auto-repaired.
+        """
+        try:
+            state = self.state(service)
+        except (OSError, subprocess.TimeoutExpired):
+            return self._failure(
+                "post-interruption verification failed",
+                ServiceState("unknown", "unknown", "unknown"),
+            )
+        if state.active == "active" and state.sub == "running":
+            return {
+                "success": True,
+                "verified": True,
+                "output": {
+                    "service": service,
+                    "after": asdict(state),
+                    "recovered": True,
+                },
+                "error": None,
+                "rollback_attempted": False,
+                "rollback_succeeded": None,
+            }
+        return self._failure(
+            "service not healthy after an interrupted execution; manual "
+            "verification required",
+            state,
+        )
+
     def _rollback(
         self, service: str, before: ServiceState, error: str
     ) -> dict[str, Any]:

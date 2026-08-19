@@ -21,6 +21,7 @@ def test_production_accepts_disabled_header_auth_with_configured_secrets():
         development_login_enabled=False,
         bootstrap_token="configured-bootstrap",
         job_claim_secret="configured-job-secret",
+        job_signing_seed="configured-job-signing-seed",
         development_session_secret="configured-session-secret",
         app_role_password="configured-app-role-password",
         oidc_issuer="https://idp.example.com/",
