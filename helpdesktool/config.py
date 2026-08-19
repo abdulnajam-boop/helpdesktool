@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     oidc_jwks_url: str = ""
     lease_reaper_max_attempts: int = 3
     lease_reaper_poll_seconds: float = 15.0
+    # Retention windows for the three tables with no cryptographic-chain
+    # constraint on deletion (contrast audit_events, which retention_worker
+    # deliberately never touches -- see its module docstring). Defaults are
+    # generous, not aggressive: heartbeats/inventory keep enough history for
+    # incident correlation and troubleshooting to still work; idempotency
+    # records only need to outlive plausible client retry windows.
+    heartbeat_retention_days: int = 30
+    inventory_retention_days: int = 90
+    idempotency_record_retention_days: int = 7
+    retention_worker_poll_seconds: float = 3600.0
     # Empty by default: /metrics is unrestricted at the application layer,
     # matching how Prometheus scraping is conventionally secured (network
     # policy / reverse proxy, not an app-level secret). Set this to require

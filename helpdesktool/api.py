@@ -797,11 +797,18 @@ def simulate_low_disk(
 
 @app.get("/v1/devices")
 def list_devices(
+    limit: int = 100,
+    offset: int = 0,
     principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
+    limit, offset = _clamp_pagination(limit, offset)
     rows = session.scalars(
-        select(Device).where(Device.tenant_id == principal.tenant_id)
+        select(Device)
+        .where(Device.tenant_id == principal.tenant_id)
+        .order_by(Device.enrolled_at.desc())
+        .offset(offset)
+        .limit(limit)
     ).all()
     return [_device_summary(session, row, principal.tenant_id) for row in rows]
 
@@ -949,15 +956,20 @@ def dashboard(
 
 @app.get("/v1/incidents")
 def list_incidents(
+    limit: int = 100,
+    offset: int = 0,
     principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
+    limit, offset = _clamp_pagination(limit, offset)
     return [
         incident_json(row)
         for row in session.scalars(
             select(Incident)
             .where(Incident.tenant_id == principal.tenant_id)
             .order_by(Incident.last_observed_at.desc())
+            .offset(offset)
+            .limit(limit)
         ).all()
     ]
 
@@ -1071,15 +1083,20 @@ def diagnose_incident(
 
 @app.get("/v1/tickets")
 def list_tickets(
+    limit: int = 100,
+    offset: int = 0,
     principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
+    limit, offset = _clamp_pagination(limit, offset)
     return [
         ticket_json(row)
         for row in session.scalars(
             select(Ticket)
             .where(Ticket.tenant_id == principal.tenant_id)
             .order_by(Ticket.updated_at.desc())
+            .offset(offset)
+            .limit(limit)
         ).all()
     ]
 
@@ -1187,15 +1204,20 @@ def create_skill_manifest(
 
 @app.get("/v1/actions")
 def list_actions(
+    limit: int = 100,
+    offset: int = 0,
     principal: Principal = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
+    limit, offset = _clamp_pagination(limit, offset)
     return [
         action_json(row)
         for row in session.scalars(
             select(Action)
             .where(Action.tenant_id == principal.tenant_id)
             .order_by(Action.created_at.desc())
+            .offset(offset)
+            .limit(limit)
         ).all()
     ]
 
@@ -1815,6 +1837,17 @@ def disable_webhook_subscription(
         {"name": row.name},
     )
     session.commit()
+
+
+def _clamp_pagination(limit: int, offset: int) -> tuple[int, int]:
+    """Every unbounded list endpoint clamps through this so none of them can
+    be made to return an unlimited result set — a genuinely large tenant
+    (or a malicious one) can no longer force an arbitrarily large query/
+    response just by not passing ``limit``. ``limit`` defaults generously
+    (100) so this is invisible to any caller that was already implicitly
+    relying on "give me everything" for a normal-sized tenant.
+    """
+    return max(1, min(limit, 500)), max(0, offset)
 
 
 def tenant_row(session: Session, model: Any, row_id: str, tenant_id: str) -> Any:

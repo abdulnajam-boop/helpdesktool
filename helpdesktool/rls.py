@@ -18,7 +18,7 @@ either of two things is true for the current database session:
    session is torn down, so a pooled connection can never leak one request's
    tenant context into an unrelated later request.
 2. ``current_setting('app.rls_bypass', true)`` equals ``'on'``. This is a
-   narrow escape hatch used in exactly three situations, all documented
+   narrow escape hatch used in exactly four situations, all documented
    where they set it:
 
    - ``helpdesktool.webhook_worker``, a trusted, non-request-driven process
@@ -38,11 +38,18 @@ either of two things is true for the current database session:
      device online/offline counts, ...) — never row-level tenant data, and
      scoped identically: set immediately before those queries, cleared
      immediately after.
+   - ``helpdesktool.retention_worker``, a trusted, non-request-driven
+     process (like ``webhook_worker``) that purges expired
+     heartbeats/inventory/idempotency rows across every tenant on a
+     schedule — retention policy is platform-wide, not scoped to any one
+     request. Never touches ``audit_events`` (see that module's docstring
+     for why deleting hash-chained rows is a different, harder problem this
+     worker deliberately does not attempt).
 
    No other code path in ``helpdesktool.api`` sets this GUC — that
    additional invariant is enforced by review/grep, not a runtime check, so
    any future change that sets it from request-handling code outside these
-   three named call sites should be treated as a security regression.
+   four named call sites should be treated as a security regression.
 
 Both ``ENABLE ROW LEVEL SECURITY`` and ``FORCE ROW LEVEL SECURITY`` are
 applied, but neither is sufficient by itself. PostgreSQL superusers and any
