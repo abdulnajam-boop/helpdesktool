@@ -5,11 +5,11 @@ import hmac
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select, text, update
+from sqlalchemy import CursorResult, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -299,6 +299,8 @@ def heartbeat(
     ):
         return cached
     device = session.get(Device, device_id)
+    if device is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
     now = datetime.now(UTC)
     device.last_seen_at = now
     session.add(
@@ -733,7 +735,12 @@ def create_action(
         body.parameters,
     )
     record = orchestrator(session, body.ticket_id).submit(request, device.os)
-    result = action_json(session.get(Action, record.request.correlation_id))
+    action_row = session.get(Action, record.request.correlation_id)
+    if action_row is None:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "action was not persisted"
+        )
+    result = action_json(action_row)
     remember(
         session, principal.tenant_id, "action", idempotency_key, payload, result, 201
     )
@@ -771,7 +778,12 @@ def decide_action(
         )
     )
     session.commit()
-    return action_json(session.get(Action, record.request.correlation_id))
+    action_row = session.get(Action, record.request.correlation_id)
+    if action_row is None:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "action was not persisted"
+        )
+    return action_json(action_row)
 
 
 @app.get("/v1/actions/{action_id}")
@@ -869,25 +881,32 @@ def claim_job(
     next_attempt = 1 if current is None else current.attempt + 1
     token = _claim_token(action_id, next_attempt, idempotency_key)
     now = datetime.now(UTC)
-    changed = session.execute(
-        update(Action)
-        .where(
-            Action.id == action_id,
-            Action.tenant_id == principal.tenant_id,
-            Action.device_id == device_id,
-            Action.status == "queued",
-        )
-        .values(
-            status="claimed",
-            claim_token_hash=hashlib.sha256(token.encode()).hexdigest(),
-            claimed_at=now,
-            lease_expires_at=now + timedelta(seconds=60),
-            attempt=Action.attempt + 1,
-        )
+    changed = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Action)
+            .where(
+                Action.id == action_id,
+                Action.tenant_id == principal.tenant_id,
+                Action.device_id == device_id,
+                Action.status == "queued",
+            )
+            .values(
+                status="claimed",
+                claim_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                claimed_at=now,
+                lease_expires_at=now + timedelta(seconds=60),
+                attempt=Action.attempt + 1,
+            )
+        ),
     ).rowcount
     if changed != 1:
         raise HTTPException(status.HTTP_409_CONFLICT, "job is unavailable")
     row = session.get(Action, action_id)
+    if row is None or row.lease_expires_at is None:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "claimed job vanished unexpectedly"
+        )
     result = {
         "id": row.id,
         "skill_id": row.skill_id,

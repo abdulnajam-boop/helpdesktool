@@ -1,38 +1,8 @@
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-from helpdesktool.api import app
 from helpdesktool.config import get_settings
-from helpdesktool.database import Base, get_session
 from helpdesktool.db_models import User, WebhookDelivery
 from helpdesktool.integrations import DeliveryResponse
 from helpdesktool.webhook_worker import WebhookWorker
 from linux_agent.executor import ServiceRestartExecutor
-
-
-@pytest.fixture
-def client(monkeypatch):
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(engine, expire_on_commit=False)
-
-    def override_session():
-        with factory() as session:
-            yield session
-
-    monkeypatch.setenv("HELPDESK_BOOTSTRAP_TOKEN", "test-bootstrap-token")
-    monkeypatch.setenv("HELPDESK_SERVICE_ALLOWLIST", "demo.service")
-    get_settings.cache_clear()
-    app.dependency_overrides[get_session] = override_session
-    with TestClient(app) as test_client:
-        yield test_client, factory
-    app.dependency_overrides.clear()
-    get_settings.cache_clear()
 
 
 def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatch):
