@@ -35,6 +35,7 @@ from .db_models import (
     Heartbeat,
     IdempotencyRecord,
     Incident,
+    SkillManifestRow,
     Tenant,
     Ticket,
     User,
@@ -59,11 +60,13 @@ from .schemas import (
     InventoryCreate,
     JobResult,
     LowDiskSimulation,
+    SkillManifestCreate,
     TenantCreate,
     TicketCreate,
     TicketUpdate,
     WebhookSubscriptionCreate,
 )
+from .skills import ParameterSpec, SkillManifest, validate_parameters
 
 app = FastAPI(title="Helpdesktool Control Plane", version="0.2.0")
 app.add_middleware(
@@ -74,17 +77,60 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
 )
 
-SKILLS = [
-    SkillDefinition(
-        "diagnostics.collect", RiskLevel.READ_ONLY, frozenset({"linux", "windows"})
-    ),
-    SkillDefinition(
-        "service.restart",
-        RiskLevel.MEDIUM,
-        frozenset({"linux", "windows"}),
-        rollback_skill_id="service.restore",
-    ),
-]
+
+def _manifest_from_row(row: SkillManifestRow) -> SkillManifest:
+    return SkillManifest(
+        skill_id=row.skill_id,
+        version=row.version,
+        risk=RiskLevel(row.risk),
+        supported_os=frozenset(row.supported_os),
+        timeout_seconds=row.timeout_seconds,
+        rollback_skill_id=row.rollback_skill_id,
+        parameters={
+            name: ParameterSpec(spec["type"], spec["required"])
+            for name, spec in row.parameters.items()
+        },
+    )
+
+
+def load_active_skill_manifests(session: Session) -> list[SkillManifest]:
+    """The active version of every registered skill, integrity-verified.
+
+    See ``helpdesktool/skills.py``'s module docstring: a manifest whose
+    stored ``content_hash`` no longer matches its recomputed hash (e.g. a
+    row edited directly in the database) fails the whole request closed
+    rather than being silently trusted or silently dropped.
+    """
+    rows = session.scalars(
+        select(SkillManifestRow).where(SkillManifestRow.active.is_(True))
+    ).all()
+    manifests = []
+    for row in rows:
+        manifest = _manifest_from_row(row)
+        if manifest.content_hash() != row.content_hash:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"skill registry integrity check failed for {row.skill_id!r}",
+            )
+        manifests.append(manifest)
+    return manifests
+
+
+def get_active_manifest(session: Session, skill_id: str) -> SkillManifest | None:
+    row = session.scalar(
+        select(SkillManifestRow).where(
+            SkillManifestRow.skill_id == skill_id, SkillManifestRow.active.is_(True)
+        )
+    )
+    if row is None:
+        return None
+    manifest = _manifest_from_row(row)
+    if manifest.content_hash() != row.content_hash:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"skill registry integrity check failed for {skill_id!r}",
+        )
+    return manifest
 
 
 class NoLocalExecutor:
@@ -107,8 +153,9 @@ class NoLocalExecutor:
 
 
 def orchestrator(session: Session, ticket_id: str | None = None) -> ActionOrchestrator:
+    skills = [m.to_skill_definition() for m in load_active_skill_manifests(session)]
     return ActionOrchestrator(
-        PolicyEngine(SKILLS),
+        PolicyEngine(skills),
         NoLocalExecutor(),
         SqlAuditLog(session),
         SqlActionStore(session, ticket_id),
@@ -898,7 +945,9 @@ def diagnose_incident(
         base_url=settings.ai_provider_base_url,
         api_key=settings.ai_provider_api_key,
         model=settings.ai_provider_model,
-        allowed_skill_ids=tuple(skill.skill_id for skill in SKILLS),
+        allowed_skill_ids=tuple(
+            m.skill_id for m in load_active_skill_manifests(session)
+        ),
         timeout_seconds=settings.ai_timeout_seconds,
         max_retries=settings.ai_max_retries,
     )
@@ -984,6 +1033,79 @@ def get_ticket(
     return result
 
 
+@app.get("/v1/skills")
+def list_skills(
+    active_only: bool = Query(default=True),
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    query = select(SkillManifestRow).order_by(
+        SkillManifestRow.skill_id, SkillManifestRow.version.desc()
+    )
+    if active_only:
+        query = query.where(SkillManifestRow.active.is_(True))
+    return [skill_manifest_json(row) for row in session.scalars(query).all()]
+
+
+@app.post("/v1/skills", status_code=201)
+def create_skill_manifest(
+    body: SkillManifestCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    risk = RiskLevel(body.risk)
+    parameters = {
+        name: ParameterSpec(spec.type, spec.required)
+        for name, spec in body.parameters.items()
+    }
+    previous = session.scalar(
+        select(SkillManifestRow)
+        .where(SkillManifestRow.skill_id == body.skill_id)
+        .order_by(SkillManifestRow.version.desc())
+        .limit(1)
+    )
+    next_version = 1 if previous is None else previous.version + 1
+    manifest = SkillManifest(
+        skill_id=body.skill_id,
+        version=next_version,
+        risk=risk,
+        supported_os=frozenset(body.supported_os),
+        timeout_seconds=body.timeout_seconds,
+        rollback_skill_id=body.rollback_skill_id,
+        parameters=parameters,
+    )
+    if previous is not None and previous.active:
+        previous.active = False
+    row = SkillManifestRow(
+        skill_id=body.skill_id,
+        version=next_version,
+        risk=str(manifest.risk),
+        supported_os=sorted(body.supported_os),
+        timeout_seconds=body.timeout_seconds,
+        rollback_skill_id=body.rollback_skill_id,
+        parameters={
+            name: {"type": spec.type, "required": spec.required}
+            for name, spec in body.parameters.items()
+        },
+        content_hash=manifest.content_hash(),
+        active=True,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    session.flush()
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "skill.registered",
+        principal.actor_id,
+        {"skill_id": row.skill_id, "version": row.version, "risk": row.risk},
+    )
+    result = skill_manifest_json(row)
+    session.commit()
+    return result
+
+
 @app.get("/v1/actions")
 def list_actions(
     principal: Principal = Depends(require_user),
@@ -1026,15 +1148,18 @@ def create_action(
         session, principal.tenant_id, "action", idempotency_key, payload
     ):
         return cached
+    manifest = get_active_manifest(session, body.skill_id)
+    if manifest is not None:
+        shape_error = validate_parameters(manifest, body.parameters)
+        if shape_error is not None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, shape_error)
+    # service.restart's *shape* (a single required "service" string) is
+    # covered generically above by the registry's parameter schema; which
+    # service names are actually allowed to be restarted is a separate,
+    # tenant-independent business policy (Settings.service_allowlist), not
+    # something the skill registry's shape-only schema is meant to express.
     if body.skill_id == "service.restart":
-        if set(body.parameters) != {"service"} or not isinstance(
-            body.parameters.get("service"), str
-        ):
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "service.restart requires only a string service parameter",
-            )
-        if body.parameters["service"] not in get_settings().allowed_services:
+        if body.parameters.get("service") not in get_settings().allowed_services:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "service is not allowlisted by control plane"
             )
@@ -1686,6 +1811,23 @@ def action_json(row: Action) -> dict[str, Any]:
         ),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def skill_manifest_json(row: SkillManifestRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "skill_id": row.skill_id,
+        "version": row.version,
+        "risk": row.risk,
+        "supported_os": row.supported_os,
+        "timeout_seconds": row.timeout_seconds,
+        "rollback_skill_id": row.rollback_skill_id,
+        "parameters": row.parameters,
+        "content_hash": row.content_hash,
+        "active": row.active,
+        "created_by": row.created_by,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
 

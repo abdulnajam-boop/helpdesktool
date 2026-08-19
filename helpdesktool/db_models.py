@@ -35,6 +35,34 @@ class Tenant(Base):
     )
 
 
+class SkillManifestRow(Base):
+    """A versioned remediation skill manifest. Global/platform-wide, not
+    tenant-owned (like ``tenants`` itself) — the set of skills that exist is
+    the same across every tenant; what varies per tenant is which ones a
+    policy allows and which devices they run on. See
+    ``helpdesktool/skills.py``'s module docstring for the full trust model,
+    in particular why this is policy metadata only and never a way to ship
+    new execution logic to an agent.
+    """
+
+    __tablename__ = "skills"
+    __table_args__ = (UniqueConstraint("skill_id", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    skill_id: Mapped[str] = mapped_column(String(200), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    risk: Mapped[str] = mapped_column(String(30))
+    supported_os: Mapped[list[str]] = mapped_column(JSON)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    rollback_skill_id: Mapped[str | None] = mapped_column(String(200))
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("tenant_id", "email"),)

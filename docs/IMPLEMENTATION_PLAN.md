@@ -814,6 +814,90 @@ CI-enforced proof rather than a manual checklist.
 
 ### Milestone 4 — Versioned, signed remediation skill registry
 
+> **Actual completion status (2026-08-19): PARTIAL, scoped deliberately.**
+> The data-driven, versioned, integrity-checked registry described below is
+> done and tested (including against real PostgreSQL, with a from-scratch
+> `alembic upgrade head` verifying the seed data). **Two things in the
+> original scope below were consciously not done, for reasons explained
+> here rather than silently dropped:**
+>
+> 1. **"Split `api.py` into per-domain routers."** This is a pure
+>    mechanical refactor of an already-1,900-line file with high blast
+>    radius (every route, every test import) and no safety or functional
+>    payoff of its own — it was bundled into this milestone only because
+>    the original scoping pass judged the skill registry would "touch the
+>    policy, action, and agent-job routes together anyway." In practice the
+>    registry only added a `load_active_skill_manifests`/`get_active_manifest`
+>    pair of helpers and two new endpoints (`GET`/`POST /v1/skills`) without
+>    needing to touch the job-claim routes at all, so the coupling that
+>    motivated bundling this in didn't materialize. Deferred to its own,
+>    deliberate pass rather than done as a side effect here.
+> 2. **Cryptographic signing** (the "signed" in the milestone title, and the
+>    stated "Dependencies: Milestone 3 (job envelope signing)" — which
+>    Milestone 3 explicitly did not build either, see above). What's built
+>    instead is **integrity verification**: every manifest carries a
+>    `content_hash` (SHA-256 over its own canonical policy fields) that
+>    `load_active_skill_manifests`/`get_active_manifest` recompute and
+>    compare on every read, failing the request closed (500) if a stored
+>    row's hash no longer matches — this catches direct database tampering
+>    that bypasses `POST /v1/skills`, which was the concrete threat this
+>    milestone exists to close. A full asymmetric-signature scheme (a
+>    private key the control plane signs with, a public key every agent
+>    verifies against, key rotation/distribution) is a real, separate
+>    piece of work with its own key-management decisions this pass didn't
+>    make unilaterally; revisit if/when agents need to verify manifests
+>    independently of trusting the control plane's own database.
+>
+> **What was actually built:**
+> - `helpdesktool/skills.py` (new): `SkillManifest`/`ParameterSpec`
+>   (shape-only parameter schema — names, types, required — never a
+>   command template), `compute_manifest_hash` (deterministic,
+>   order-independent canonical hash), and `validate_parameters` (the
+>   generic replacement for what used to be a single hardcoded
+>   `if body.skill_id == "service.restart"` block in `api.py`).
+> - New `skills` table (migration `0008`) — platform-wide, **not**
+>   tenant-scoped (added to `rls.UNSCOPED_APPLICATION_TABLES` alongside
+>   `tenants`, since the set of registered skills is the same across every
+>   tenant), versioned via a `(skill_id, version)` unique constraint with
+>   exactly one `active` row per `skill_id` at a time. Seeded with the two
+>   skills that previously lived only as a hardcoded Python list literal
+>   (`diagnostics.collect`, `service.restart`), at identical policy values,
+>   so this is a zero-behavior-change migration for existing functionality.
+> - `GET /v1/skills` (any authenticated role) and `POST /v1/skills`
+>   (`owner`/`admin` only — registering a new version deactivates the
+>   previous active version of that `skill_id` in the same transaction).
+> - `api.py`'s `orchestrator()` and the AI diagnosis endpoint's
+>   `allowed_skill_ids` now both load the registry from the database
+>   instead of the old `SKILLS` literal; `create_action`'s parameter-shape
+>   validation is now generic (driven by the matching manifest's
+>   `parameters` schema) rather than hardcoded per skill id — this closed a
+>   pre-existing gap where `diagnostics.collect` had *no* control-plane-side
+>   parameter validation at all (only `service.restart` did), relying
+>   solely on the agent's own allowlist.
+> - **What this milestone deliberately does not change**, by design, not
+>   as a gap: registering a manifest for a skill id no agent has an
+>   executor for is harmless and does nothing — the agent's own
+>   hardcoded, deterministic executor and local allowlist are still the
+>   sole authority over *how* (or whether) a skill actually runs; see
+>   `helpdesktool/skills.py`'s module docstring. Adding a genuinely new
+>   *mutating* capability still requires an agent code change; this
+>   milestone's "data change, not a code deploy" claim from the original
+>   scope below applies to risk tier, OS support, timeout, versioning, and
+>   parameter shape — not to shipping new execution logic, which this
+>   architecture deliberately never allows to be data-driven (see
+>   `CLAUDE.md`'s "no shell, no parameter-templated execution" invariant).
+>
+> **Tests:** `tests/test_skills.py` (11 cases — hash determinism, tamper
+> detection, shape validation including the number/boolean distinction) and
+> `tests/test_skill_registry_api.py` (7 cases — listing, role enforcement,
+> version supersession, unknown-skill-id still denies via policy rather than
+> silently allowing, schema-rejected parameters, and a genuine direct-database
+> tampering test proving the integrity check fails the request closed). Full
+> suite: 123 passed, 0 failed, 0 skipped, verified in a `python:3.13` Linux
+> container against a real Postgres 17 container matching CI, including a
+> from-scratch `alembic upgrade head` run confirming the seeded manifests'
+> hashes and the restricted `helpdesk_app` role's access.
+
 **Build:**
 - Replace the hardcoded `SKILLS` list in `api.py` with a data-driven, versioned,
   signed skill manifest (skill id, version, risk, supported OS, parameter schema,
