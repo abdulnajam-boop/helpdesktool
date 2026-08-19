@@ -1301,14 +1301,14 @@ to the same standard as the Linux path.
 >   already cover this MVP stage's practical operational-visibility need
 >   (which request touched which log lines; aggregate golden-signal
 >   metrics). Revisit if/when a specific collector target is chosen.
-> - **Frontend Reporting page and list-endpoint pagination not built this
->   pass** — both are real, separately-scoped pieces of work (a
->   dashboard-quality reporting UI, and consistent `limit`/`offset` or
->   cursor pagination across `/v1/devices`, `/v1/tickets`, `/v1/actions`,
->   `/v1/incidents`) that this milestone's original scope bundled in but
->   this pass judged better done as their own dedicated milestones (P3/P5
->   frontend work, P6 data-lifecycle work) rather than rushed as an add-on
->   here.
+> - **Frontend Reporting page not built this pass** — real, separately-
+>   scoped work (a dashboard-quality reporting UI) this milestone's
+>   original scope bundled in but this pass judged better done as its own
+>   dedicated milestone rather than rushed as an add-on here.
+>   List-endpoint pagination, the other item originally bundled into this
+>   milestone, **was** closed — as part of Milestone 10's data-lifecycle
+>   work instead, since that's where the rest of the "bounded storage/
+>   response size" concern (retention) already lived; see that section.
 >
 > **Tests:** `tests/test_observability.py` (10 cases — JSON formatter output
 > shape, request-id binding, request-id generation/propagation through a
@@ -1608,6 +1608,57 @@ the codebase with zero automated test coverage.
 ---
 
 ### Milestone 10 — Enterprise and scale hardening
+
+> **Actual completion status (2026-08-20): PARTIAL.** Retention/cleanup
+> (this milestone's first bullet below) is done and tested, plus
+> pagination on the previously-unbounded list endpoints (not originally
+> scoped to this milestone, but the same underlying "bounded storage/
+> response size" concern, so grouped here). **Not done:** SSO/SCIM,
+> approval quorum, policy-as-code, immutable audit export/legal-hold —
+> all real, separately-scoped pieces of enterprise work untouched this
+> pass.
+>
+> **What was actually built:**
+> - `helpdesktool/retention_worker.py` (new, `helpdesk-retention-worker`
+>   entry point/Compose service): purges `heartbeats`/`device_inventory`/
+>   `idempotency_records` rows older than
+>   `Settings.heartbeat_retention_days`/`inventory_retention_days`/
+>   `idempotency_record_retention_days` (30/90/7 days by default), on an
+>   hourly poll. **Deliberately never touches `audit_events`** — it's
+>   hash-chained (`helpdesktool/audit.py`), so deleting an old row would
+>   break verification of every row after it; a real retention story there
+>   needs a checkpoint/archival design (anchor a new chain "genesis" from a
+>   signed snapshot of an archived segment) this pass did not build, so
+>   audit history stays retained indefinitely by design, not oversight —
+>   see the module's docstring for why this is the correct call rather than
+>   a shortcut. Fourth and last documented use of the cross-tenant
+>   `rls_bypass` GUC, alongside `webhook_worker`/`lease_reaper`/
+>   `auth.aggregating_platform_metrics` — `rls.py`'s module docstring
+>   updated to match (it had drifted stale after Milestone 6 added the
+>   third use but this fourth one wasn't wired in yet at the time).
+> - `GET /v1/devices`, `/v1/tickets`, `/v1/actions`, `/v1/incidents` all
+>   gained `limit`/`offset` query parameters (default `limit=100`, clamped
+>   to a hard max of 500 via a new shared `_clamp_pagination` helper) —
+>   previously fully unbounded, a genuine scale/DoS concern for a tenant
+>   with a very large number of rows. Kept the response as a bare list
+>   (not `{"items": [...], "total": N}`) deliberately, to stay backward
+>   compatible with the existing frontend and any other consumer rather
+>   than making a breaking API change for this pass; a real "next page" UX
+>   (cursor pagination, total counts, frontend pager controls) is future
+>   work. `/v1/devices` also gained a stable `ORDER BY enrolled_at DESC`
+>   it didn't have before (pagination without stable ordering is
+>   unreliable — rows can shift between pages).
+>
+> **Tests:** `tests/test_retention_worker.py` (4 cases — purges expired
+> heartbeats/inventory while keeping recent ones, purges expired
+> idempotency records, **never touches `audit_events` even when
+> artificially backdated 10 years**, clears `rls_bypass` after running) and
+> `tests/test_pagination.py` (4 cases — default limit caps a 120-row
+> result to 100, offset paging across 30 rows produces no duplicates/gaps,
+> an attempted million-row limit request is still clamped and succeeds,
+> the other three endpoints accept the same query parameters). Full suite
+> passing, verified in a `python:3.13` Linux container against a real
+> Postgres 17 container matching CI.
 
 **Build:**
 - Retention/cleanup jobs for `device_inventory`, `heartbeats`,

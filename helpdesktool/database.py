@@ -48,10 +48,15 @@ def set_tenant_context(session: Session, tenant_id: str) -> None:
 def set_rls_bypass(session: Session, *, enabled: bool) -> None:
     """Grant or revoke cross-tenant row visibility for ``session``.
 
-    Reserved for trusted, non-request-driven internal processes that must
-    legitimately operate across every tenant by design (currently only the
-    webhook delivery worker). Must never be called from any code path that
-    handles an inbound HTTP request.
+    Reserved for the four narrowly scoped, documented uses described in
+    ``helpdesktool.rls``'s module docstring (``webhook_worker``,
+    ``lease_reaper``, ``retention_worker``, and
+    ``auth.resolving_identity``/``auth.aggregating_platform_metrics`` for
+    the two in-request exceptions) — trusted, non-request-driven internal
+    processes that must legitimately operate across every tenant by design,
+    plus the two narrow identity-resolution/metrics-aggregation lookups.
+    Must never be called from any other code path that handles an inbound
+    HTTP request.
     """
     if not _is_postgresql(session):
         return
