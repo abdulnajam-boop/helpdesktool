@@ -21,9 +21,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["httpx>=0.27,<1", "mypy>=1.13,<2", "pytest>=8,<10", "ruff>=0.8,<1"]
+# psutil is genuinely cross-platform (installs and runs fine on Linux, which
+# is what makes windows_agent's collector/executor *logic* testable in CI).
+# pywin32 is Windows-only on PyPI — the sys_platform marker makes pip skip
+# it entirely on non-Windows instead of failing the install; only actually
+# constructing windows_agent.win32_service_manager.Win32ServiceManager (real
+# Win32 API calls, never imported at module level elsewhere) requires it.
+windows = ["psutil>=6,<8", "pywin32>=306; sys_platform == \"win32\""]
 
 [project.scripts]
 helpdesk-linux-agent = "linux_agent.agent:main"
+helpdesk-windows-agent = "windows_agent.agent:main"
+helpdesk-windows-agent-service = "windows_agent.service:main"
 helpdesk-webhook-worker = "helpdesktool.webhook_worker:main"
 helpdesk-lease-reaper = "helpdesktool.lease_reaper:main"
 helpdesk-seed = "helpdesktool.seed:seed"
@@ -34,7 +43,7 @@ Repository = "https://github.com/abdulnajam-boop/helpdesktool.git"
 Issues = "https://github.com/abdulnajam-boop/helpdesktool/issues"
 
 [tool.setuptools.packages.find]
-include = ["helpdesktool*", "linux_agent*"]
+include = ["helpdesktool*", "linux_agent*", "windows_agent*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
