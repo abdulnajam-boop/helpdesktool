@@ -92,5 +92,36 @@ services:
     cap_drop: ["ALL"]
     restart: unless-stopped
 
+  # Optional local observability stack -- not started by a plain
+  # `docker compose up`. Run `docker compose --profile observability up` to
+  # include these two. Prometheus scrapes the API's `GET /metrics`
+  # (deploy/prometheus.yml); Grafana comes with that Prometheus already
+  # wired as its default datasource (deploy/grafana-datasource.yml) so
+  # there's a real dashboard to build on immediately, not just an empty
+  # Grafana instance.
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./deploy/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports: ["3001:3000"]
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   postgres-data:

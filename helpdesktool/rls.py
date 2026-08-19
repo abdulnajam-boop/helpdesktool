@@ -18,8 +18,8 @@ either of two things is true for the current database session:
    session is torn down, so a pooled connection can never leak one request's
    tenant context into an unrelated later request.
 2. ``current_setting('app.rls_bypass', true)`` equals ``'on'``. This is a
-   narrow escape hatch used in exactly two situations, both documented where
-   they set it:
+   narrow escape hatch used in exactly three situations, all documented
+   where they set it:
 
    - ``helpdesktool.webhook_worker``, a trusted, non-request-driven process
      that legitimately operates across every tenant by design, sets it for
@@ -31,11 +31,18 @@ either of two things is true for the current database session:
      exactly what it is computing. It is set immediately before that one
      query and unconditionally cleared immediately after, before any other
      code runs; the lookup itself grants no access on its own (a credential
-     still has to match). No other code path in ``helpdesktool.api`` sets
-     this GUC — that additional invariant is enforced by review/grep, not a
-     runtime check, so any future change that sets it from request-handling
-     code outside ``resolving_identity`` should be treated as a security
-     regression.
+     still has to match).
+   - ``helpdesktool.auth.aggregating_platform_metrics``, used only by
+     ``GET /metrics``'s Prometheus exporter to compute platform-wide
+     `COUNT(*) ... GROUP BY` aggregates (action/incident status counts,
+     device online/offline counts, ...) — never row-level tenant data, and
+     scoped identically: set immediately before those queries, cleared
+     immediately after.
+
+   No other code path in ``helpdesktool.api`` sets this GUC — that
+   additional invariant is enforced by review/grep, not a runtime check, so
+   any future change that sets it from request-handling code outside these
+   three named call sites should be treated as a security regression.
 
 Both ``ENABLE ROW LEVEL SECURITY`` and ``FORCE ROW LEVEL SECURITY`` are
 applied, but neither is sufficient by itself. PostgreSQL superusers and any
@@ -80,10 +87,15 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
 )
 
 # Tables the application role needs ordinary DML on but that are not
-# themselves tenant-scoped/RLS-protected (tenants is the root of the tenancy
-# model, and skills is a platform-wide registry — see helpdesktool/skills.py
-# — so neither has a tenant_id to scope by).
-UNSCOPED_APPLICATION_TABLES: tuple[str, ...] = ("tenants", "skills")
+# themselves tenant-scoped/RLS-protected: tenants is the root of the tenancy
+# model, skills is a platform-wide registry (helpdesktool/skills.py), and
+# worker_heartbeats tracks background-process liveness — none of the three
+# has a tenant_id to scope by.
+UNSCOPED_APPLICATION_TABLES: tuple[str, ...] = (
+    "tenants",
+    "skills",
+    "worker_heartbeats",
+)
 
 # Sequences backing the two integer-autoincrement primary keys in the schema
 # (every other table uses a UUID string primary key with no sequence).

@@ -4,14 +4,18 @@ import hashlib
 import hmac
 import json
 import secrets
+import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import CursorResult, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request
 
 from .ai.provider import diagnose_with_fallback, get_ai_provider
 from .auth import (
@@ -47,6 +51,13 @@ from .events import EventType
 from .incidents import detect_inventory_incidents, incident_json
 from .integrations import validate_webhook_url
 from .job_signing import CURRENT_KEY_VERSION, public_key_pem, sign_envelope
+from .logging_config import configure_logging, set_request_id
+from .metrics import (
+    DEVICE_ONLINE_THRESHOLD,
+    HTTP_REQUEST_DURATION_SECONDS,
+    HTTP_REQUESTS_TOTAL,
+    render_metrics,
+)
 from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
@@ -69,6 +80,8 @@ from .schemas import (
 )
 from .skills import ParameterSpec, SkillManifest, validate_parameters
 
+configure_logging()
+
 app = FastAPI(title="Helpdesktool Control Plane", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
@@ -77,6 +90,42 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
 )
+
+
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Propagates/generates a per-request correlation id (``X-Request-ID``),
+    binds it to every structured log line emitted while handling this
+    request (``helpdesktool.logging_config``), echoes it back in the
+    response, and records the two HTTP-level Prometheus metrics
+    (``helpdesktool.metrics``) against the matched route *template* — never
+    the raw path, which would blow up label cardinality with every distinct
+    device/action/incident id ever requested.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        set_request_id(request_id)
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        finally:
+            set_request_id(None)
+        duration = time.monotonic() - started
+        route = request.scope.get("route")
+        path_template = getattr(route, "path", request.url.path)
+        HTTP_REQUESTS_TOTAL.labels(
+            method=request.method, path=path_template, status=str(response.status_code)
+        ).inc()
+        HTTP_REQUEST_DURATION_SECONDS.labels(
+            method=request.method, path=path_template
+        ).observe(duration)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+app.add_middleware(RequestIdMiddleware)
 
 
 def _manifest_from_row(row: SkillManifestRow) -> SkillManifest:
@@ -234,6 +283,24 @@ def liveness() -> dict[str, str]:
 def readiness(session: Session = Depends(get_session)) -> dict[str, str]:
     session.execute(text("SELECT 1"))
     return {"status": "ready"}
+
+
+@app.get("/metrics")
+def metrics_endpoint(
+    authorization: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+) -> Response:
+    token = get_settings().metrics_token
+    if token:
+        supplied = (authorization or "").removeprefix("Bearer ")
+        if (
+            not authorization
+            or not authorization.startswith("Bearer ")
+            or not (secrets.compare_digest(supplied, token))
+        ):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid metrics token")
+    body, content_type = render_metrics(session)
+    return Response(content=body, media_type=content_type)
 
 
 def _require_development_login() -> None:
@@ -822,7 +889,7 @@ def dashboard(
 ) -> dict[str, Any]:
     tenant_id = principal.tenant_id
     devices = session.scalars(select(Device).where(Device.tenant_id == tenant_id)).all()
-    online_cutoff = datetime.now(UTC) - timedelta(minutes=5)
+    online_cutoff = datetime.now(UTC) - DEVICE_ONLINE_THRESHOLD
     recent_incidents = session.scalars(
         select(Incident)
         .where(Incident.tenant_id == tenant_id)
@@ -1813,7 +1880,7 @@ def _claim_token(action_id: str, attempt: int, idempotency_key: str) -> str:
 def device_json(row: Device) -> dict[str, Any]:
     online = bool(
         row.last_seen_at
-        and _aware(row.last_seen_at) >= datetime.now(UTC) - timedelta(minutes=5)
+        and _aware(row.last_seen_at) >= datetime.now(UTC) - DEVICE_ONLINE_THRESHOLD
     )
     return {
         "id": row.id,

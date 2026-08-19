@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 from .config import Settings, get_settings
 from .database import SessionLocal, set_rls_bypass
 from .db_models import Action
-from .persistence import SqlAuditLog
+from .logging_config import configure_logging
+from .persistence import SqlAuditLog, record_worker_heartbeat
 
 LOG = logging.getLogger("helpdesktool-lease-reaper")
 
@@ -94,15 +95,14 @@ class LeaseReaper:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    configure_logging()
     settings = get_settings()
     reaper = LeaseReaper(settings)
     while True:
         try:
             with SessionLocal() as session:
                 processed = reaper.process_batch(session)
+                record_worker_heartbeat(session, "lease_reaper", processed)
             if processed == 0:
                 time.sleep(settings.lease_reaper_poll_seconds)
         except Exception:

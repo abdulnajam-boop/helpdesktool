@@ -16,6 +16,7 @@ from .db_models import (
     ExecutionResultRow,
     WebhookDelivery,
     WebhookSubscription,
+    WorkerHeartbeatRow,
 )
 from .events import AUDIT_EVENT_MAPPING, DomainEvent, EventType, sanitize_event_data
 from .models import (
@@ -229,3 +230,28 @@ class SqlAuditLog:
                     )
                 )
         self.session.flush()
+
+
+def record_worker_heartbeat(
+    session: Session, worker_name: str, batch_size: int
+) -> None:
+    """Upserts a background worker's liveness signal (``worker_heartbeats``
+    — platform-wide/unscoped, see ``helpdesktool.rls``), called by
+    ``webhook_worker.py``/``lease_reaper.py`` at the end of every loop
+    iteration, whether or not that batch found anything to do. Consumed by
+    ``GET /metrics``'s ``helpdesk_worker_heartbeat_age_seconds`` gauge.
+    """
+    row = session.get(WorkerHeartbeatRow, worker_name)
+    now = datetime.now(UTC)
+    if row is None:
+        session.add(
+            WorkerHeartbeatRow(
+                worker_name=worker_name,
+                last_heartbeat_at=now,
+                last_batch_size=batch_size,
+            )
+        )
+    else:
+        row.last_heartbeat_at = now
+        row.last_batch_size = batch_size
+    session.commit()
