@@ -55,6 +55,20 @@ class TicketUpdate(BaseModel):
     priority: Literal["low", "normal", "high", "critical"] | None = None
 
 
+class SkillParameterSpec(BaseModel):
+    type: Literal["string", "number", "boolean"]
+    required: bool = True
+
+
+class SkillManifestCreate(BaseModel):
+    skill_id: str = Field(min_length=1, max_length=200)
+    risk: Literal["read_only", "low", "medium", "high", "prohibited"]
+    supported_os: list[Literal["linux", "windows"]] = Field(min_length=1)
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+    rollback_skill_id: str | None = Field(default=None, max_length=200)
+    parameters: dict[str, SkillParameterSpec] = Field(default_factory=dict)
+
+
 class ActionCreate(BaseModel):
     device_id: str
     skill_id: str = Field(min_length=1, max_length=200)

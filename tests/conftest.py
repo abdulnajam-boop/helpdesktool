@@ -15,6 +15,8 @@ from sqlalchemy.pool import StaticPool
 from helpdesktool.api import app
 from helpdesktool.config import Settings, get_settings
 from helpdesktool.database import Base, get_session, reset_tenant_context
+from helpdesktool.db_models import SkillManifestRow
+from helpdesktool.models import RiskLevel
 from helpdesktool.oidc import OIDCVerifier
 from helpdesktool.rls import (
     TENANT_SCOPED_TABLES,
@@ -24,12 +26,65 @@ from helpdesktool.rls import (
     provision_app_role_statements,
     stage_app_role_password_statement,
 )
+from helpdesktool.skills import compute_manifest_hash
 from tests.support import StaticKeyResolver, generate_test_keypair
 
 TEST_OIDC_ISSUER = "https://idp.test.internal/"
 TEST_OIDC_AUDIENCE = "https://api.test.internal"
 TEST_OIDC_JWKS_URL = "https://idp.test.internal/.well-known/jwks.json"
 TEST_APP_ROLE_PASSWORD = "test-app-role-password"
+
+_DEFAULT_SKILL_SEEDS = (
+    {
+        "skill_id": "diagnostics.collect",
+        "risk": RiskLevel.READ_ONLY,
+        "rollback_skill_id": None,
+        "parameters": {},
+    },
+    {
+        "skill_id": "service.restart",
+        "risk": RiskLevel.MEDIUM,
+        "rollback_skill_id": "service.restore",
+        "parameters": {"service": {"type": "string", "required": True}},
+    },
+)
+
+
+def _seed_default_skills(engine: Engine) -> None:
+    """Mirrors migration ``0008``'s seed data. Fixtures build the schema
+    directly from ``Base.metadata`` rather than running Alembic (the same
+    shortcut they already take for RLS — see ``_provision_rls_schema_and_role``
+    below), so without this the skill registry a freshly built test schema
+    starts with is empty and every ``service.restart`` action in the test
+    suite would be rejected as "not allowlisted" — this keeps test schemas
+    equivalent to a real migrated database for the two built-in skills.
+    """
+    with sessionmaker(engine)() as session:
+        for seed in _DEFAULT_SKILL_SEEDS:
+            content_hash = compute_manifest_hash(
+                skill_id=seed["skill_id"],
+                version=1,
+                risk=seed["risk"],
+                supported_os=frozenset({"linux", "windows"}),
+                timeout_seconds=30,
+                rollback_skill_id=seed["rollback_skill_id"],
+                parameters=seed["parameters"],
+            )
+            session.add(
+                SkillManifestRow(
+                    skill_id=seed["skill_id"],
+                    version=1,
+                    risk=str(seed["risk"]),
+                    supported_os=["linux", "windows"],
+                    timeout_seconds=30,
+                    rollback_skill_id=seed["rollback_skill_id"],
+                    parameters=seed["parameters"],
+                    content_hash=content_hash,
+                    active=True,
+                    created_by="00000000-0000-0000-0000-000000000000",
+                )
+            )
+        session.commit()
 
 
 @pytest.fixture
@@ -39,6 +94,7 @@ def client(monkeypatch) -> Iterator[tuple[TestClient, sessionmaker[Session]]]:
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
     Base.metadata.create_all(engine)
+    _seed_default_skills(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
 
     def override_session() -> Iterator[Session]:
@@ -125,6 +181,7 @@ def postgres_session_factory() -> Iterator[sessionmaker[Session]]:
     engine = _connect_or_skip(_require_test_database_url())
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    _seed_default_skills(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     try:
         yield factory
@@ -153,6 +210,7 @@ def postgres_rls_session_factory() -> Iterator[sessionmaker[Session]]:
     superuser_engine = _connect_or_skip(_require_test_database_url())
     Base.metadata.drop_all(superuser_engine)
     Base.metadata.create_all(superuser_engine)
+    _seed_default_skills(superuser_engine)
     app_role_url = _provision_rls_schema_and_role(superuser_engine)
     app_engine = _connect_or_skip(app_role_url)
     factory = sessionmaker(app_engine, expire_on_commit=False)
@@ -175,6 +233,7 @@ def postgres_rls_single_connection_factory() -> Iterator[sessionmaker[Session]]:
     superuser_engine = _connect_or_skip(_require_test_database_url())
     Base.metadata.drop_all(superuser_engine)
     Base.metadata.create_all(superuser_engine)
+    _seed_default_skills(superuser_engine)
     app_role_url = _provision_rls_schema_and_role(superuser_engine)
     app_engine = create_engine(app_role_url, pool_size=1, max_overflow=0)
     try:
@@ -213,6 +272,7 @@ def postgres_client(
     superuser_engine = _connect_or_skip(_require_test_database_url())
     Base.metadata.drop_all(superuser_engine)
     Base.metadata.create_all(superuser_engine)
+    _seed_default_skills(superuser_engine)
     app_role_url = _provision_rls_schema_and_role(superuser_engine)
     app_engine = _connect_or_skip(app_role_url)
     factory = sessionmaker(app_engine, expire_on_commit=False)

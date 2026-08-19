@@ -81,8 +81,9 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
 
 # Tables the application role needs ordinary DML on but that are not
 # themselves tenant-scoped/RLS-protected (tenants is the root of the tenancy
-# model; there is nothing to scope it by).
-UNSCOPED_APPLICATION_TABLES: tuple[str, ...] = ("tenants",)
+# model, and skills is a platform-wide registry — see helpdesktool/skills.py
+# — so neither has a tenant_id to scope by).
+UNSCOPED_APPLICATION_TABLES: tuple[str, ...] = ("tenants", "skills")
 
 # Sequences backing the two integer-autoincrement primary keys in the schema
 # (every other table uses a UUID string primary key with no sequence).
