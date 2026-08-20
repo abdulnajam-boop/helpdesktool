@@ -94,6 +94,27 @@ def test_failed_verification_triggers_rollback():
     assert audit.events[-1].event_type == "rollback.completed"
 
 
+def test_failed_verification_does_not_roll_back_a_skill_marked_not_reversible():
+    """Mirrors policy.automation_level_for's L2 condition exactly
+    (reversible AND rollback_skill_id) -- a skill declaring
+    reversible=False must never have rollback silently attempted anyway
+    just because it also carries a rollback_skill_id label."""
+    skill = SkillDefinition(
+        "service.restart",
+        RiskLevel.LOW,
+        frozenset({"linux", "windows"}),
+        rollback_skill_id="service.restore",
+        reversible=False,
+    )
+    audit = InMemoryAuditLog()
+    executor = FakeExecutor(verified=False)
+    orchestrator = ActionOrchestrator(PolicyEngine([skill]), executor, audit)
+    record = orchestrator.submit(request(), "linux")
+    assert record.status is ActionStatus.FAILED
+    assert audit.events[-1].event_type == "execution.failed"
+    assert not any(e.event_type == "rollback.completed" for e in audit.events)
+
+
 def test_cross_tenant_approval_is_hidden():
     orchestrator, _, _ = build(RiskLevel.HIGH)
     record = orchestrator.submit(request(), "linux")
