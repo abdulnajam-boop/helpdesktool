@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from windows_agent.executor import (
+    DnsFlushCacheExecutor,
     ServiceControlError,
     ServiceRestartExecutor,
     ServiceState,
@@ -129,3 +130,46 @@ def test_construction_requires_a_valid_nonempty_allowlist():
         ServiceRestartExecutor((), FakeServiceManager([]))
     with pytest.raises(ValueError):
         ServiceRestartExecutor(("bad;name",), FakeServiceManager([]))
+
+
+class FakeDnsResolver:
+    def __init__(self, outcomes: list[bool | Exception]) -> None:
+        self._outcomes = iter(outcomes)
+        self.calls = 0
+
+    def flush(self) -> bool:
+        self.calls += 1
+        value = next(self._outcomes)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def test_dns_flush_cache_succeeds():
+    resolver = FakeDnsResolver([True])
+    result = DnsFlushCacheExecutor(resolver).execute({})
+    assert result["success"] is True
+    assert result["verified"] is True
+    assert result["rollback_attempted"] is False
+    assert resolver.calls == 1
+
+
+def test_dns_flush_cache_rejects_parameters_without_calling_resolver():
+    resolver = FakeDnsResolver([])
+    with pytest.raises(ValueError):
+        DnsFlushCacheExecutor(resolver).execute({"unexpected": "value"})
+    assert resolver.calls == 0
+
+
+def test_dns_flush_cache_reports_api_failure():
+    resolver = FakeDnsResolver([False])
+    result = DnsFlushCacheExecutor(resolver).execute({})
+    assert result["success"] is False
+    assert result["error"] == "DnsFlushResolverCache reported failure"
+
+
+def test_dns_flush_cache_reports_resolver_error_without_raising():
+    resolver = FakeDnsResolver([ServiceControlError("dnsapi.dll unavailable")])
+    result = DnsFlushCacheExecutor(resolver).execute({})
+    assert result["success"] is False
+    assert "dnsapi.dll unavailable" in result["error"]

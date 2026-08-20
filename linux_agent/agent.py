@@ -6,7 +6,7 @@ import socket
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from agent_common.journal import ExecutionJournal
@@ -15,7 +15,7 @@ from agent_common.signing import EnvelopeError, verify_envelope
 from .client import ApiError, ControlPlaneClient
 from .collectors import collect_inventory
 from .config import AgentConfig
-from .executor import ServiceRestartExecutor
+from .executor import DnsFlushCacheExecutor, ServiceRestartExecutor
 
 LOG = logging.getLogger("helpdesktool-linux-agent")
 
@@ -25,7 +25,12 @@ LOG = logging.getLogger("helpdesktool-linux-agent")
 # agent must also recognize the exact skill_id/version pair.
 SUPPORTED_SKILL_VERSIONS: dict[str, frozenset[int]] = {
     "service.restart": frozenset({1}),
+    "dns.flush_cache": frozenset({1}),
 }
+
+
+class _JobExecutor(Protocol):
+    def execute(self, parameters: dict[str, Any]) -> dict[str, Any]: ...
 
 
 class LinuxAgent:
@@ -45,6 +50,9 @@ class LinuxAgent:
             if config.allowed_services
             else None
         )
+        # Always available: unlike service.restart, dns.flush_cache targets
+        # no caller-chosen resource, so there is nothing to allowlist.
+        self.dns_executor: DnsFlushCacheExecutor | None = DnsFlushCacheExecutor()
 
     def enroll(self) -> None:
         if self.config.device_id and self.config.agent_token:
@@ -283,20 +291,31 @@ class LinuxAgent:
             )
         except EnvelopeError as exc:
             return self._invalid(str(exc))
-        if self.executor is None:
-            return self._invalid("service remediation is disabled: allowlist is empty")
+        skill_id = str(envelope.get("skill_id", ""))
+        executor = self._executor_for(skill_id)
+        if executor is None:
+            return self._invalid(
+                "no executor available for this skill (allowlist empty or unknown skill)"
+            )
         parameters = envelope.get("parameters")
         if not isinstance(parameters, dict):
             return self._invalid("invalid parameters")
         if job_id:
             self.journal.mark_executing(job_id)
         try:
-            result = self.executor.execute(parameters)
+            result = executor.execute(parameters)
         except (PermissionError, ValueError) as exc:
             result = self._invalid(str(exc))
         if job_id:
             self.journal.mark_executed(job_id, result)
         return result
+
+    def _executor_for(self, skill_id: str) -> _JobExecutor | None:
+        if skill_id == "service.restart":
+            return self.executor
+        if skill_id == "dns.flush_cache":
+            return self.dns_executor
+        return None
 
     def _identity(self) -> tuple[str, str]:
         if not self.config.device_id or not self.config.agent_token:

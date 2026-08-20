@@ -4,7 +4,7 @@ from pathlib import Path
 
 from linux_agent.agent import LinuxAgent
 from linux_agent.config import AgentConfig
-from linux_agent.executor import ServiceRestartExecutor
+from linux_agent.executor import DnsFlushCacheExecutor, ServiceRestartExecutor
 from tests.support import agent_signing_public_key_pem, build_signed_job_envelope
 
 
@@ -284,6 +284,36 @@ def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
     reloaded = AgentConfig.load(config_path)
     assert reloaded.tenant_id == "tenant-42"
     assert reloaded.device_id == "device-42"
+
+
+def test_dns_flush_cache_job_dispatches_to_dns_executor_and_executes(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.dns_executor = DnsFlushCacheExecutor(runner=_running)
+    envelope = build_signed_job_envelope(
+        device_id="device-1",
+        tenant_id="tenant-1",
+        skill_id="dns.flush_cache",
+        parameters={},
+    )
+    result = agent.execute_job(envelope, job_id=None)
+    assert result["success"] is True
+    assert result["verified"] is True
+
+
+def test_dns_flush_cache_failure_does_not_touch_service_restart_executor(tmp_path):
+    def _fail_if_called(*_a, **_k):
+        raise AssertionError("service.restart executor should not run for this job")
+
+    agent = build_agent(tmp_path, runner=_fail_if_called)
+    agent.dns_executor = DnsFlushCacheExecutor(runner=_running)
+    envelope = build_signed_job_envelope(
+        device_id="device-1",
+        tenant_id="tenant-1",
+        skill_id="dns.flush_cache",
+        parameters={},
+    )
+    result = agent.execute_job(envelope, job_id=None)
+    assert result["success"] is True
 
 
 def test_enroll_with_token_is_a_noop_once_already_enrolled(tmp_path):

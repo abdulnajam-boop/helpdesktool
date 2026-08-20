@@ -174,3 +174,37 @@ def test_rollback_skill_reference_is_not_required_to_be_independently_registered
     )
     # Does not raise, even though "service.restore" isn't in known_skill_ids.
     validate_remediation_skill_references(steps, frozenset({"service.restart"}))
+
+
+def test_dns_resolution_failure_workflow_with_flush_cache_remediation_validates():
+    """Mirrors the exact 5-step sequence migration 0017 writes for the
+    dns_resolution_failure reference issue: collect_evidence and
+    check_precondition are unchanged from migration 0013's original
+    escalate-only workflow; a new remediate step references the
+    dns.flush_cache skill registered by migration 0016; a verify step
+    follows it; escalate still fires for a real DNS misconfiguration or a
+    flush that didn't fix resolution. Proves the updated knowledge content
+    is valid and only ever references a real, registered skill."""
+    steps = (
+        DiagnosticStep(
+            0, "collect_evidence", "Collect network.dns_servers from device inventory."
+        ),
+        DiagnosticStep(
+            1,
+            "check_precondition",
+            "Compare configured DNS servers against the organization's baseline.",
+        ),
+        DiagnosticStep(
+            2,
+            "remediate",
+            "Attempt dns.flush_cache before escalating.",
+            remediation_skill_id="dns.flush_cache",
+        ),
+        DiagnosticStep(3, "verify", "Confirm resolution succeeds afterward."),
+        DiagnosticStep(
+            4, "escalate", "Escalate if config deviates or resolution still fails."
+        ),
+    )
+    validate_remediation_skill_references(
+        steps, frozenset({"diagnostics.collect", "service.restart", "dns.flush_cache"})
+    )

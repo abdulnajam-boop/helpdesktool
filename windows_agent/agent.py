@@ -7,7 +7,7 @@ import socket
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from agent_common.journal import ExecutionJournal
@@ -16,7 +16,12 @@ from agent_common.signing import EnvelopeError, verify_envelope
 from .client import ApiError, ControlPlaneClient
 from .collectors import collect_inventory
 from .config import AgentConfig
-from .executor import ServiceManager, ServiceRestartExecutor
+from .executor import (
+    DnsFlushCacheExecutor,
+    DnsFlushResolver,
+    ServiceManager,
+    ServiceRestartExecutor,
+)
 
 LOG = logging.getLogger("helpdesktool-windows-agent")
 
@@ -26,7 +31,12 @@ LOG = logging.getLogger("helpdesktool-windows-agent")
 # agent must also recognize the exact skill_id/version pair.
 SUPPORTED_SKILL_VERSIONS: dict[str, frozenset[int]] = {
     "service.restart": frozenset({1}),
+    "dns.flush_cache": frozenset({1}),
 }
+
+
+class _JobExecutor(Protocol):
+    def execute(self, parameters: dict[str, Any]) -> dict[str, Any]: ...
 
 
 def _default_config_path() -> Path:
@@ -41,6 +51,7 @@ class WindowsAgent:
         config_path: Path,
         client: ControlPlaneClient | None = None,
         service_manager: ServiceManager | None = None,
+        dns_resolver: DnsFlushResolver | None = None,
     ) -> None:
         self.config = config
         self.config_path = config_path
@@ -54,6 +65,11 @@ class WindowsAgent:
             if config.allowed_services
             else None
         )
+        # Always available: unlike service.restart, dns.flush_cache targets
+        # no caller-chosen resource, so there is nothing to allowlist.
+        self.dns_executor: DnsFlushCacheExecutor | None = DnsFlushCacheExecutor(
+            dns_resolver or self._default_dns_resolver()
+        )
 
     @staticmethod
     def _default_manager() -> ServiceManager:
@@ -64,6 +80,16 @@ class WindowsAgent:
         from .win32_service_manager import Win32ServiceManager
 
         return Win32ServiceManager()
+
+    @staticmethod
+    def _default_dns_resolver() -> DnsFlushResolver:
+        # Imported lazily for the same reason as _default_manager() above —
+        # Win32DnsResolver only needs ctypes.WinDLL, which doesn't exist on
+        # non-Windows platforms, so the import must not happen at module
+        # level or on a test-injected WindowsAgent.
+        from .win32_dns_resolver import Win32DnsResolver
+
+        return Win32DnsResolver()
 
     def enroll(self) -> None:
         if self.config.device_id and self.config.agent_token:
@@ -298,20 +324,31 @@ class WindowsAgent:
             )
         except EnvelopeError as exc:
             return self._invalid(str(exc))
-        if self.executor is None:
-            return self._invalid("service remediation is disabled: allowlist is empty")
+        skill_id = str(envelope.get("skill_id", ""))
+        executor = self._executor_for(skill_id)
+        if executor is None:
+            return self._invalid(
+                "no executor available for this skill (allowlist empty or unknown skill)"
+            )
         parameters = envelope.get("parameters")
         if not isinstance(parameters, dict):
             return self._invalid("invalid parameters")
         if job_id:
             self.journal.mark_executing(job_id)
         try:
-            result = self.executor.execute(parameters)
+            result = executor.execute(parameters)
         except (PermissionError, ValueError) as exc:
             result = self._invalid(str(exc))
         if job_id:
             self.journal.mark_executed(job_id, result)
         return result
+
+    def _executor_for(self, skill_id: str) -> _JobExecutor | None:
+        if skill_id == "service.restart":
+            return self.executor
+        if skill_id == "dns.flush_cache":
+            return self.dns_executor
+        return None
 
     def _identity(self) -> tuple[str, str]:
         if not self.config.device_id or not self.config.agent_token:
