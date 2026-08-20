@@ -1745,9 +1745,43 @@ configurable approval policy, and exportable/auditable compliance evidence.
 >   for this public repo, no license needed), `pip-audit` against the
 >   installed backend dependency set, `npm audit --audit-level=high`
 >   against the frontend. The existing `docker` job gained
->   `aquasecurity/trivy-action@0.24.0` scans of both built images
+>   `aquasecurity/trivy-action@v0.36.0` scans of both built images
 >   (`CRITICAL,HIGH`, `exit-code: 1`, `ignore-unfixed: true`) immediately
 >   after each `docker build` step, before the runtime smoke test.
+> - **Container image findings the trivy gate immediately surfaced and
+>   fixed, verified locally with `trivy image` before ever relying on
+>   CI to catch it:**
+>   - `Dockerfile` (API image) was single-stage and shipped `pip` (with
+>     its own vendored `msgpack` and `pkg_resources`/`setuptools` copies —
+>     see `pip`'s `vendor.txt`) straight into the runtime image, flagged
+>     HIGH by trivy (GHSA-6v7p-g79w-8964, CVE-2025-47273) even though
+>     nothing at runtime imports either. Rewritten as a multi-stage build:
+>     a `builder` stage installs into `/opt/venv` then
+>     `pip uninstall -y pip setuptools wheel` from that venv before it's
+>     copied into the `runtime` stage; the runtime stage *also* runs
+>     `python -m pip uninstall -y pip` against `python:3.13-slim`'s own
+>     preinstalled `/usr/local` pip (a second, separate copy from the
+>     venv's — easy to miss, confirmed by rescanning after the first fix
+>     still showed the same two findings). Console scripts (`uvicorn`,
+>     `alembic`, `helpdesk-seed`, etc.) are plain files with a
+>     venv-`python` shebang and keep working with no pip present at all —
+>     verified by actually starting the rebuilt image and curling
+>     `/health/live`, not just asserting it should work. `apt-get upgrade`
+>     added to the runtime stage for the base Debian image's own OS
+>     package CVEs (`bsdutils`/`libblkid1` etc., CVE-2026-53615).
+>   - `frontend/Dockerfile`'s final stage (`nginx:1.27-alpine`) was a
+>     stale pinned tag carrying 35 fixable OS-package CVEs (2 CRITICAL, 33
+>     HIGH — `libxml2`, `musl`, `nghttp2`, `zlib`). Bumped to
+>     `nginx:1.31-alpine` (latest published alpine tag) and added
+>     `apk update && apk upgrade --no-cache` in that stage so the image
+>     keeps picking up Alpine security patches released after this tag on
+>     every rebuild, not only when the pinned tag is next bumped by hand.
+>   - Both fixes verified with a real `docker build` + `trivy image
+>     --severity CRITICAL,HIGH --ignore-unfixed` locally (zero findings on
+>     both images afterward) and a real `docker run` + health-check curl
+>     against each rebuilt image, before pushing — the same
+>     build-then-actually-run discipline that caught the Dockerfile's
+>     missing `agent_common` `COPY` earlier this session.
 >
 > **Tests:** `tests/test_hardening.py` (12 cases — 9 isolated middleware
 > unit tests against a minimal standalone Starlette app covering headers
