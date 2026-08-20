@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 
+from .action_preview import build_action_preview
 from .ai.provider import diagnose_with_fallback, get_ai_provider
 from .auth import (
     Principal,
@@ -106,7 +107,7 @@ from .models import (
 )
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
-from .policy import PolicyEngine
+from .policy import PolicyEngine, automation_level_for
 from .reporting import build_report
 from .schemas import (
     ActionCreate,
@@ -2574,6 +2575,75 @@ def get_action(
             correlations.add(incident_id)
     result["timeline"] = _audit_for(session, principal.tenant_id, correlations)
     return result
+
+
+@app.get("/v1/actions/{action_id}/preview")
+def preview_action(
+    action_id: str,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 14: "show exactly what this specific action would do, without
+    running it" as one explicit, structured answer, computed fresh from
+    the current active skill manifest every call -- see
+    ``action_preview.py``'s module docstring. Works regardless of the
+    action's current status; the preview always reflects what *would*
+    happen if it ran against the manifest as currently registered, which
+    may have changed version since this action was originally requested.
+    """
+    row = tenant_row(session, Action, action_id, principal.tenant_id)
+    manifest = get_active_manifest(session, row.skill_id)
+    if manifest is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"skill {row.skill_id!r} is no longer an active registered skill",
+        )
+    skill_definition = manifest.to_skill_definition()
+    policy_decision = PolicyEngine([skill_definition]).evaluate(
+        ActionRequest(
+            tenant_id=principal.tenant_id,
+            device_id=row.device_id,
+            skill_id=row.skill_id,
+            requested_by=row.requested_by,
+            parameters=row.parameters,
+        ),
+        row.device_os,
+    )
+    automation_level = automation_level_for(
+        skill_definition, policy_decision.approval_required
+    )
+    preview = build_action_preview(
+        manifest=manifest,
+        parameters=row.parameters,
+        policy_decision=policy_decision,
+        automation_level=automation_level,
+    )
+    return {
+        "action_id": row.id,
+        "action_status": row.status,
+        "skill_id": preview.skill_id,
+        "skill_version": preview.skill_version,
+        "command_type": preview.command_type,
+        "risk": preview.risk,
+        "required_privilege": preview.required_privilege,
+        "timeout_seconds": preview.timeout_seconds,
+        "parameters": preview.parameters,
+        "preconditions": preview.preconditions,
+        "expected_output": preview.expected_output,
+        "success_condition": preview.success_condition,
+        "failure_condition": preview.failure_condition,
+        "side_effects": preview.side_effects,
+        "requires_reboot": preview.requires_reboot,
+        "reversible": preview.reversible,
+        "rollback_skill_id": preview.rollback_skill_id,
+        "automation_level": preview.automation_level.value,
+        "policy_allowed": preview.policy_allowed,
+        "approval_required": preview.approval_required,
+        "policy_reason": preview.policy_reason,
+        "what_would_execute": preview.what_would_execute,
+        "verification_plan": preview.verification_plan,
+        "rollback_plan": preview.rollback_plan,
+    }
 
 
 @app.get("/v1/devices/{device_id}/signing-key")
