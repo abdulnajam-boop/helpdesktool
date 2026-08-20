@@ -95,6 +95,7 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "conversations",
     "conversation_messages",
     "connector_requests",
+    "organizational_baselines",
 )
 
 # Tables the application role needs ordinary DML on but that are not

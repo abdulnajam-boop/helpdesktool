@@ -194,6 +194,21 @@ class DiagnosticWorkflowCreate(BaseModel):
     steps: list[DiagnosticStepCreate] = Field(min_length=1, max_length=50)
 
 
+class OrganizationalBaselineCreate(BaseModel):
+    scope: Literal[
+        "generic_best_practice",
+        "organizational_policy",
+        "device_baseline",
+        "user_baseline",
+        "current_state",
+    ]
+    key: str = Field(min_length=1, max_length=200)
+    value: Any
+    device_id: str | None = None
+    user_id: str | None = None
+    description: str = Field(default="", max_length=2000)
+
+
 class WebhookSubscriptionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=1, max_length=2048)

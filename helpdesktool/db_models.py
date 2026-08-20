@@ -632,3 +632,33 @@ class DiagnosticStepRow(Base):
     verification_description: Mapped[str] = mapped_column(Text, default="")
     rollback_skill_id: Mapped[str | None] = mapped_column(String(200))
     reference_description: Mapped[str] = mapped_column(Text, default="")
+
+
+class OrganizationalBaselineRow(Base):
+    """A tenant's declared "known good" value for some configuration key,
+    at a given scope (Phase 6) -- see ``helpdesktool/baseline.py``'s module
+    docstring. Tenant-scoped/RLS-protected, unlike the platform-wide
+    knowledge tables above, since an organizational baseline is inherently
+    specific to one tenant's own environment.
+    """
+
+    __tablename__ = "organizational_baselines"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    scope: Mapped[str] = mapped_column(String(30))
+    key: Mapped[str] = mapped_column(String(200), index=True)
+    value: Mapped[Any] = mapped_column(JSON)
+    device_id: Mapped[str | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    description: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
