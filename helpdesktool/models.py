@@ -67,6 +67,25 @@ class SecurityClassification(StrEnum):
     CONFIRMED_COMPROMISE = "confirmed_compromise"
 
 
+class BaselineScope(StrEnum):
+    """Phase 6: distinguishes *where* a "known-good" value for some
+    configuration key comes from, so a remediation/diagnosis path can never
+    conflate "a generic public recommendation" with "what this specific
+    organization actually wants." The canonical example the roadmap gives:
+    a device failing DNS resolution must never be treated as evidence that
+    the fix is a public resolver (8.8.8.8/1.1.1.1) -- it may simply mean
+    the device has drifted from the organization's own configured DNS.
+    See ``helpdesktool/baseline.py``'s ``resolve_known_good`` for the
+    precedence order these five scopes resolve in.
+    """
+
+    GENERIC_BEST_PRACTICE = "generic_best_practice"
+    ORGANIZATIONAL_POLICY = "organizational_policy"
+    DEVICE_BASELINE = "device_baseline"
+    USER_BASELINE = "user_baseline"
+    CURRENT_STATE = "current_state"
+
+
 class ActionStatus(StrEnum):
     REQUESTED = "requested"
     PENDING_APPROVAL = "pending_approval"

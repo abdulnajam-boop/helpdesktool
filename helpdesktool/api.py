@@ -25,6 +25,7 @@ from .auth import (
     require_user,
     resolving_identity,
 )
+from .baseline import BaselineEntry, BaselineValidationError, resolve_known_good
 from .confidence import ConfidenceInput, compute_confidence
 from .config import get_settings
 from .connectors import ConnectorRegistry
@@ -51,6 +52,7 @@ from .db_models import (
     Incident,
     IssueDefinitionRow,
     KnowledgeSourceRow,
+    OrganizationalBaselineRow,
     SkillManifestRow,
     Tenant,
     Ticket,
@@ -112,6 +114,7 @@ from .schemas import (
     JobResult,
     KnowledgeSourceCreate,
     LowDiskSimulation,
+    OrganizationalBaselineCreate,
     SkillManifestCreate,
     TenantCreate,
     TicketCreate,
@@ -1735,6 +1738,140 @@ def create_diagnostic_workflow(
         "id": workflow.id,
         "issue_definition_id": issue_definition_id,
         "version": workflow.version,
+    }
+
+
+def baseline_json(row: OrganizationalBaselineRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "scope": row.scope,
+        "key": row.key,
+        "value": row.value,
+        "device_id": row.device_id,
+        "user_id": row.user_id,
+        "description": row.description,
+        "active": row.active,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+    }
+
+
+@app.post("/v1/baselines", status_code=201)
+def create_organizational_baseline(
+    body: OrganizationalBaselineCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Registers this tenant's own declared "known good" value for a
+    configuration key (Phase 6) -- see ``helpdesktool/baseline.py``'s
+    module docstring. A device_baseline/user_baseline entry's device_id/
+    user_id must belong to this tenant (checked the same way any other
+    tenant-scoped foreign reference is -- ``tenant_row`` fails closed with
+    404 rather than trusting a client-supplied id from another tenant).
+    """
+    if body.device_id is not None:
+        tenant_row(session, Device, body.device_id, principal.tenant_id)
+    if body.user_id is not None:
+        tenant_row(session, User, body.user_id, principal.tenant_id)
+    try:
+        BaselineEntry(
+            scope=body.scope,  # type: ignore[arg-type]
+            key=body.key,
+            value=body.value,
+            device_id=body.device_id,
+            user_id=body.user_id,
+            description=body.description,
+        )
+    except BaselineValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    row = OrganizationalBaselineRow(
+        tenant_id=principal.tenant_id,
+        scope=body.scope,
+        key=body.key,
+        value=body.value,
+        device_id=body.device_id,
+        user_id=body.user_id,
+        description=body.description,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    session.flush()
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "baseline.registered",
+        principal.actor_id,
+        {"scope": row.scope, "key": row.key},
+    )
+    result = baseline_json(row)
+    session.commit()
+    return result
+
+
+@app.get("/v1/baselines")
+def list_organizational_baselines(
+    key: str | None = None,
+    active_only: bool = Query(default=True),
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    query = select(OrganizationalBaselineRow).where(
+        OrganizationalBaselineRow.tenant_id == principal.tenant_id
+    )
+    if key is not None:
+        query = query.where(OrganizationalBaselineRow.key == key)
+    if active_only:
+        query = query.where(OrganizationalBaselineRow.active.is_(True))
+    rows = session.scalars(query.order_by(OrganizationalBaselineRow.key)).all()
+    return [baseline_json(row) for row in rows]
+
+
+@app.get("/v1/baselines/resolve")
+def resolve_organizational_baseline(
+    key: str,
+    device_id: str | None = None,
+    user_id: str | None = None,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Resolves the single most authoritative known-good value for ``key``
+    for this tenant (Phase 6) -- see ``helpdesktool.baseline.resolve_known_good``.
+    Returns ``{"resolved": null}`` when nothing at all is declared for this
+    key; callers must never invent a fallback (e.g. a public DNS resolver)
+    on a null result themselves.
+    """
+    rows = session.scalars(
+        select(OrganizationalBaselineRow).where(
+            OrganizationalBaselineRow.tenant_id == principal.tenant_id,
+            OrganizationalBaselineRow.key == key,
+            OrganizationalBaselineRow.active.is_(True),
+        )
+    ).all()
+    entries = [
+        BaselineEntry(
+            scope=row.scope,  # type: ignore[arg-type]
+            key=row.key,
+            value=row.value,
+            device_id=row.device_id,
+            user_id=row.user_id,
+            description=row.description,
+        )
+        for row in rows
+    ]
+    resolved = resolve_known_good(entries, key, device_id=device_id, user_id=user_id)
+    if resolved is None:
+        return {"resolved": None}
+    return {
+        "resolved": {
+            "scope": resolved.scope,
+            "key": resolved.key,
+            "value": resolved.value,
+            "device_id": resolved.device_id,
+            "user_id": resolved.user_id,
+            "description": resolved.description,
+        }
     }
 
 

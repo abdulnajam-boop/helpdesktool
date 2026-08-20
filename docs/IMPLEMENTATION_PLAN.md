@@ -2295,6 +2295,75 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > scoped future work each requiring its own deterministic, allowlisted
 > agent-side executor, not a knowledge-schema change.
 
+> **Milestone 15 — Phase 6 known-good organizational state (DONE,
+> 2026-08-20).** Adds the distinction, previously entirely absent, between
+> "a generic public best practice" and "what this specific tenant actually
+> configured/wants" — the roadmap's own worked example: a device failing
+> DNS resolution must never be "fixed" by substituting a public resolver
+> (8.8.8.8/1.1.1.1) just because resolution is failing.
+>
+> - `helpdesktool/models.py`'s new `BaselineScope` StrEnum: five values —
+>   `GENERIC_BEST_PRACTICE`, `ORGANIZATIONAL_POLICY`, `DEVICE_BASELINE`,
+>   `USER_BASELINE`, `CURRENT_STATE`.
+> - `helpdesktool/baseline.py` (new): `BaselineEntry` dataclass (scope-
+>   specific validation — a `device_baseline` entry must carry a
+>   `device_id`, an `organizational_policy`/`generic_best_practice`/
+>   `current_state` entry must not) and `resolve_known_good(entries, key,
+>   *, device_id=None, user_id=None)` — the pure precedence-resolution
+>   function: `device_baseline` > `user_baseline` > `organizational_policy`
+>   > `generic_best_practice`, with `current_state` entries never
+>   themselves returnable (they describe what *is* configured, not what
+>   *should* be). Returns `None` — never an invented fallback — when
+>   nothing at all is declared for a key.
+> - New tenant-scoped/RLS-protected table `organizational_baselines`
+>   (migration `0014_organizational_baselines`, revision id pre-verified
+>   at 29 characters) — unlike Milestones 13/14's platform-wide knowledge
+>   tables, a baseline is inherently one tenant's own data.
+> - New API: `POST /v1/baselines` (owner/admin, validates any
+>   `device_id`/`user_id` actually belongs to the caller's tenant via the
+>   same `tenant_row` pattern every other tenant-scoped reference uses),
+>   `GET /v1/baselines` (list/filter by `key`), `GET /v1/baselines/resolve`
+>   (runs `resolve_known_good` against the caller's own tenant rows only).
+>
+> **Real bug found and fixed during testing:** `BaselineEntry.scope` is
+> typed as `BaselineScope`, but nothing coerced a plain `str` (as arrives
+> from a Pydantic `Literal` field or a raw DB row) into the actual enum
+> member — `resolve_known_good` and `__post_init__` both use `is`/`is not`
+> identity comparison against `BaselineScope` members, so a same-value-but-
+> different-object `str` silently made every one of those checks a no-op
+> instead of raising or filtering correctly (a `device_baseline` entry with
+> no `device_id` passed validation it should have failed; a `device_id`
+> filter in `resolve_known_good` matched every device instead of only the
+> requested one). Two of the new API tests caught this immediately. Fixed
+> by coercing in `BaselineEntry.__post_init__` itself
+> (`object.__setattr__(self, "scope", BaselineScope(self.scope))` when not
+> already the enum type) rather than at each call site, so the dataclass is
+> robust regardless of what a future caller passes in.
+>
+> **Tests:** `tests/test_baseline.py` (13 unit tests, including the DNS
+> example explicitly by name, device/user baseline precedence, and
+> `current_state` never being returned) and `tests/test_baseline_api.py`
+> (7 integration tests, including a foreign-tenant `device_id` reference
+> correctly rejected 404, and full tenant isolation of both `POST
+> /v1/baselines` and `GET /v1/baselines/resolve` against real behavior, not
+> just RLS's presence). Verified against real Postgres 17 with RLS
+> genuinely enforced (the restricted `helpdesk_app` role, not a superuser):
+> a fresh `alembic upgrade head`, `\d organizational_baselines` confirming
+> the `tenant_isolation` policy with `FORCE ROW LEVEL SECURITY`, then two
+> real tenants created via the live API — tenant A registers an
+> `organizational_policy` DNS baseline, tenant B's `GET
+> /v1/baselines/resolve?key=dns_servers` correctly returns
+> `{"resolved": null}`, tenant A's own resolve call correctly returns its
+> `organizational_policy` entry. `ruff`/`ruff format --check`/
+> `mypy --strict` clean; full `pytest` suite re-run with only the 4 known
+> pre-existing Windows-only failures, no regressions.
+>
+> Not yet done: not wired into any live diagnosis/remediation code path —
+> there is still no code path from a registered `DiagnosticStep` to
+> actually calling `resolve_known_good` before proposing/executing a
+> remediation. That wiring is real, separately-scoped future work, same as
+> Milestone 13's knowledge schema.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
