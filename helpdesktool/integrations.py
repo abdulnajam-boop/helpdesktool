@@ -69,6 +69,29 @@ class IntegrationProvider(Protocol):
     ) -> DeliveryResponse: ...
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuses every HTTP redirect rather than following it.
+
+    ``validate_webhook_url`` only ever checks the URL a subscription is
+    registered/re-validated with -- the default ``urlopen`` opener follows
+    3xx redirects to *any* destination the remote server names, completely
+    bypassing that check. A webhook target an attacker controls (or a
+    legitimate one later compromised) could 302 a delivery to
+    ``http://169.254.169.254/...`` (cloud instance metadata) or
+    ``http://localhost:6379/`` and this code would happily follow it with
+    no further validation. Returning ``None`` here tells urllib not to
+    follow the redirect; the 3xx response is surfaced to the caller as an
+    ordinary (non-2xx) delivery outcome instead, same as any other HTTP
+    error status.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
 class SignedWebhookProvider:
     """Generic webhook adapter compatible with n8n and other HTTP consumers."""
 
@@ -93,7 +116,7 @@ class SignedWebhookProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            with _NO_REDIRECT_OPENER.open(request, timeout=timeout_seconds) as response:
                 return DeliveryResponse(
                     response.status, response.read(4096).decode(errors="replace")
                 )

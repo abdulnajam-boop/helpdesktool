@@ -8,6 +8,7 @@ production uses without depending on any provider being reachable.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -130,6 +131,82 @@ def test_token_signed_by_a_different_key_is_rejected(keypair):
     )
     with pytest.raises(InvalidIdentityToken):
         verifier.verify(token)
+
+
+def test_none_algorithm_token_is_rejected(keypair, verifier):
+    """The classic JWT bypass: a token asserting alg=none and carrying no
+    signature at all. OIDCVerifier pins algorithms to ("RS256", "ES256"),
+    so PyJWT must refuse this before any signature check even runs -- if
+    "none" were ever accidentally added to that allowlist, this is the
+    test that would catch it.
+    """
+    header = jwt.utils.base64url_encode(
+        json.dumps({"alg": "none", "typ": "JWT"}).encode()
+    ).decode()
+    now = datetime.now(UTC)
+    payload = jwt.utils.base64url_encode(
+        json.dumps(
+            {
+                "iss": ISSUER,
+                "aud": AUDIENCE,
+                "sub": "attacker",
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(minutes=5)).timestamp()),
+            }
+        ).encode()
+    ).decode()
+    forged = f"{header}.{payload}."
+    with pytest.raises(InvalidIdentityToken):
+        verifier.verify(forged)
+
+
+def test_rs256_to_hs256_key_confusion_attack_is_rejected(keypair, verifier):
+    """A well-known JWT library attack: sign a token with HS256, using the
+    server's own RSA *public* key (which is not secret -- it's published at
+    the JWKS endpoint) as the HMAC secret. If a verifier ever passed
+    whatever key it resolved straight to HS256 verification regardless of
+    the token's claimed algorithm, this would forge a valid-looking token
+    from public information alone. OIDCVerifier's algorithms allowlist
+    (RS256/ES256 only) must reject the HS256 header before any of that.
+
+    Hand-built rather than via jwt.encode(..., algorithm="HS256"): PyJWT's
+    own encoder already refuses to use PEM-shaped bytes as an HMAC key,
+    which would make this test pass for the wrong reason (an encode-time
+    guard, not proof of OIDCVerifier's own algorithms allowlist). A real
+    attacker isn't required to use PyJWT to forge the token in the first
+    place, so this constructs the raw JWT bytes directly instead.
+    """
+    import base64
+    import hmac as hmac_module
+
+    from cryptography.hazmat.primitives import serialization
+
+    def b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    _, public_key = keypair
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    now = datetime.now(UTC)
+    header = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    payload = b64url(
+        json.dumps(
+            {
+                "iss": ISSUER,
+                "aud": AUDIENCE,
+                "sub": "attacker",
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(minutes=5)).timestamp()),
+            }
+        ).encode()
+    )
+    signing_input = f"{header}.{payload}".encode()
+    signature = hmac_module.new(public_pem, signing_input, "sha256").digest()
+    forged = f"{header}.{payload}.{b64url(signature)}"
+    with pytest.raises(InvalidIdentityToken):
+        verifier.verify(forged)
 
 
 def test_construction_requires_issuer_audience_and_jwks_url():
