@@ -75,6 +75,7 @@ class ActionOrchestrator:
                 "approval_required": decision.approval_required,
                 "reason": decision.reason,
                 "risk": risk.value,
+                "automation_level": decision.automation_level.value,
             },
         )
         if status is ActionStatus.APPROVED:

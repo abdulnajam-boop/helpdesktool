@@ -25,6 +25,7 @@ from .auth import (
     require_user,
     resolving_identity,
 )
+from .confidence import ConfidenceInput, compute_confidence
 from .config import get_settings
 from .connectors import ConnectorRegistry
 from .connectors.mock import MockApplicationConnector
@@ -70,7 +71,13 @@ from .metrics import (
     HTTP_REQUESTS_TOTAL,
     render_metrics,
 )
-from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
+from .models import (
+    ActionRequest,
+    CommandType,
+    ExecutionResult,
+    RiskLevel,
+    SkillDefinition,
+)
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
 from .policy import PolicyEngine
@@ -182,6 +189,19 @@ def _manifest_from_row(row: SkillManifestRow) -> SkillManifest:
             name: ParameterSpec(spec["type"], spec["required"])
             for name, spec in row.parameters.items()
         },
+        command_type=CommandType(row.command_type),
+        requires_user_approval=row.requires_user_approval,
+        requires_admin_approval=row.requires_admin_approval,
+        security_sensitive=row.security_sensitive,
+        reversible=row.reversible,
+        required_privilege=row.required_privilege,
+        preconditions=row.preconditions,
+        expected_output=row.expected_output,
+        success_condition=row.success_condition,
+        failure_condition=row.failure_condition,
+        side_effects=row.side_effects,
+        requires_reboot=row.requires_reboot,
+        allowed_execution_context=row.allowed_execution_context,
     )
 
 
@@ -1116,6 +1136,44 @@ def diagnose_incident(
     )
     diagnosis = diagnose_with_fallback(provider, evidence)
     proposal = diagnosis.proposal
+
+    # Confidence is never trusted from the AI provider -- computed
+    # deterministically from real, inspectable evidence instead. See
+    # helpdesktool/confidence.py's module docstring for why.
+    device = session.get(Device, incident.device_id)
+    telemetry_reliability = 1.0
+    missing_signals = 0
+    if device is not None and device.last_seen_at is not None:
+        staleness = datetime.now(UTC) - _aware(device.last_seen_at)
+        if staleness > DEVICE_ONLINE_THRESHOLD:
+            telemetry_reliability = 0.5
+            missing_signals = 1
+    elif device is None or device.last_seen_at is None:
+        telemetry_reliability = 0.5
+        missing_signals = 1
+    supporting_signals = sum(
+        [
+            incident.occurrence_count > 1,
+            incident.severity in {"high", "critical"},
+        ]
+    )
+    confidence_result = compute_confidence(
+        ConfidenceInput(
+            required_signals_present=1,
+            required_signals_total=1,
+            supporting_signals=supporting_signals,
+            contradicting_signals=0,
+            missing_signals=missing_signals,
+            source_reliability=1.0,
+            telemetry_reliability=telemetry_reliability,
+            historical_baseline_matches=0,
+            evidence_notes=(
+                f"incident observed {incident.occurrence_count} time(s)",
+                f"severity={incident.severity}",
+            ),
+        )
+    )
+
     row = Diagnosis(
         tenant_id=principal.tenant_id,
         incident_id=incident.id,
@@ -1125,7 +1183,7 @@ def diagnose_incident(
         fallback_used=diagnosis.fallback_used,
         summary=proposal.summary,
         likely_root_cause=proposal.likely_root_cause,
-        confidence=proposal.confidence,
+        confidence=confidence_result.score,
         suggested_skill_id=proposal.suggested_skill_id,
         suggested_parameters=proposal.suggested_parameters,
         escalate=proposal.escalate,
@@ -1146,6 +1204,9 @@ def diagnose_incident(
             "fallback_used": diagnosis.fallback_used,
             "suggested_skill_id": proposal.suggested_skill_id,
             "escalate": proposal.escalate,
+            "confidence_score": confidence_result.score,
+            "confidence_band": confidence_result.band,
+            "confidence_evidence_summary": confidence_result.evidence_summary,
         },
     )
     result = diagnosis_json(row)
@@ -1241,6 +1302,11 @@ def create_skill_manifest(
         timeout_seconds=body.timeout_seconds,
         rollback_skill_id=body.rollback_skill_id,
         parameters=parameters,
+        command_type=CommandType(body.command_type),
+        requires_user_approval=body.requires_user_approval,
+        requires_admin_approval=body.requires_admin_approval,
+        security_sensitive=body.security_sensitive,
+        reversible=body.reversible,
     )
     if previous is not None and previous.active:
         previous.active = False
@@ -1255,6 +1321,19 @@ def create_skill_manifest(
             name: {"type": spec.type, "required": spec.required}
             for name, spec in body.parameters.items()
         },
+        command_type=body.command_type,
+        requires_user_approval=body.requires_user_approval,
+        requires_admin_approval=body.requires_admin_approval,
+        security_sensitive=body.security_sensitive,
+        reversible=body.reversible,
+        required_privilege=body.required_privilege,
+        preconditions=body.preconditions,
+        expected_output=body.expected_output,
+        success_condition=body.success_condition,
+        failure_condition=body.failure_condition,
+        side_effects=body.side_effects,
+        requires_reboot=body.requires_reboot,
+        allowed_execution_context=body.allowed_execution_context,
         content_hash=manifest.content_hash(),
         active=True,
         created_by=principal.actor_id,
@@ -2323,6 +2402,19 @@ def skill_manifest_json(row: SkillManifestRow) -> dict[str, Any]:
         "timeout_seconds": row.timeout_seconds,
         "rollback_skill_id": row.rollback_skill_id,
         "parameters": row.parameters,
+        "command_type": row.command_type,
+        "requires_user_approval": row.requires_user_approval,
+        "requires_admin_approval": row.requires_admin_approval,
+        "security_sensitive": row.security_sensitive,
+        "reversible": row.reversible,
+        "required_privilege": row.required_privilege,
+        "preconditions": row.preconditions,
+        "expected_output": row.expected_output,
+        "success_condition": row.success_condition,
+        "failure_condition": row.failure_condition,
+        "side_effects": row.side_effects,
+        "requires_reboot": row.requires_reboot,
+        "allowed_execution_context": row.allowed_execution_context,
         "content_hash": row.content_hash,
         "active": row.active,
         "created_by": row.created_by,

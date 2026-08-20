@@ -17,6 +17,56 @@ class RiskLevel(StrEnum):
     PROHIBITED = "prohibited"
 
 
+class CommandType(StrEnum):
+    """A second, independent safety dimension from ``RiskLevel``: what
+    *class* of change a skill makes, not how risky policy considers it.
+    ``PolicyEngine`` hard-blocks ``DESTRUCTIVE`` unconditionally — see its
+    module docstring — regardless of what risk tier a manifest claims,
+    so a future skill mismarked as low-risk can never make a destructive
+    change autonomously "by accident."
+    """
+
+    READ_ONLY = "read_only"
+    LOW_RISK_CHANGE = "low_risk_change"
+    PRIVILEGED_CHANGE = "privileged_change"
+    SECURITY_CONTAINMENT = "security_containment"
+    DESTRUCTIVE = "destructive"
+
+
+class AutomationLevel(StrEnum):
+    """How much human involvement a given action needs before/while it
+    runs -- a distinct concept from ``RiskLevel``/``CommandType`` (how
+    risky/what class of change) and from ``SecurityClassification``
+    (what the evidence suggests is happening). A suspicious event does not
+    automatically mean L5, and a low-risk read-only skill is always L0/L1
+    regardless of what triggered it.
+    """
+
+    L0_OBSERVE_ONLY = "l0_observe_only"
+    L1_SAFE_AUTOMATIC = "l1_safe_automatic"
+    L2_AUTOMATIC_VERIFY_ROLLBACK = "l2_automatic_verify_rollback"
+    L3_USER_APPROVAL = "l3_user_approval"
+    L4_ADMIN_APPROVAL = "l4_admin_approval"
+    L5_SECURITY_INCIDENT = "l5_security_incident"
+
+
+class SecurityClassification(StrEnum):
+    """What correlated evidence suggests about an incident/device state.
+    Never assigned from a single weak signal alone (high CPU, a port
+    number, PowerShell, an unsigned binary, one failed login, ...) -- see
+    ``helpdesktool/security_classification.py``'s module docstring for the
+    correlation rules that actually assign this.
+    """
+
+    NORMAL = "normal"
+    UNKNOWN = "unknown"
+    MISCONFIGURATION = "misconfiguration"
+    POLICY_VIOLATION = "policy_violation"
+    SUSPICIOUS = "suspicious"
+    LIKELY_COMPROMISED = "likely_compromised"
+    CONFIRMED_COMPROMISE = "confirmed_compromise"
+
+
 class ActionStatus(StrEnum):
     REQUESTED = "requested"
     PENDING_APPROVAL = "pending_approval"
@@ -54,6 +104,11 @@ class SkillDefinition:
     supported_os: frozenset[str]
     timeout_seconds: int = 30
     rollback_skill_id: str | None = None
+    command_type: CommandType = CommandType.LOW_RISK_CHANGE
+    requires_user_approval: bool = False
+    requires_admin_approval: bool = False
+    security_sensitive: bool = False
+    reversible: bool = True
 
     def __post_init__(self) -> None:
         if not self.skill_id or not self.supported_os:

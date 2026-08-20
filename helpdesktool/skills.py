@@ -41,7 +41,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .models import RiskLevel, SkillDefinition
+from .models import CommandType, RiskLevel, SkillDefinition
 
 _ALLOWED_PARAMETER_TYPES = frozenset({"string", "number", "boolean"})
 
@@ -69,6 +69,30 @@ class SkillManifest:
     timeout_seconds: int
     rollback_skill_id: str | None
     parameters: Mapping[str, ParameterSpec] = field(default_factory=dict)
+    # Phase 2 safety metadata (docs/CURRENT_ARCHITECTURE_AUDIT.md). The five
+    # fields below are *hash-covered* (see compute_manifest_hash) because
+    # each one gates a policy decision on its own -- tampering with any of
+    # them directly in the database, bypassing POST /v1/skills, must be
+    # caught by integrity verification exactly like tampering with risk or
+    # supported_os already is. The remaining descriptive fields (below the
+    # dataclass) are documentation/planning metadata, not safety gates, and
+    # are deliberately not hash-covered -- see their own comment.
+    command_type: CommandType = CommandType.LOW_RISK_CHANGE
+    requires_user_approval: bool = False
+    requires_admin_approval: bool = False
+    security_sensitive: bool = False
+    reversible: bool = True
+    # Descriptive-only (not hash-covered): documentation/planning metadata
+    # an operator or a future knowledge-driven planner can read, but that
+    # never by itself changes what policy allows or requires approval for.
+    required_privilege: str = ""
+    preconditions: Mapping[str, Any] = field(default_factory=dict)
+    expected_output: str = ""
+    success_condition: str = ""
+    failure_condition: str = ""
+    side_effects: str = ""
+    requires_reboot: bool = False
+    allowed_execution_context: str = ""
 
     def to_skill_definition(self) -> SkillDefinition:
         return SkillDefinition(
@@ -77,6 +101,11 @@ class SkillManifest:
             self.supported_os,
             self.timeout_seconds,
             self.rollback_skill_id,
+            self.command_type,
+            self.requires_user_approval,
+            self.requires_admin_approval,
+            self.security_sensitive,
+            self.reversible,
         )
 
     def content_hash(self) -> str:
@@ -88,6 +117,11 @@ class SkillManifest:
             timeout_seconds=self.timeout_seconds,
             rollback_skill_id=self.rollback_skill_id,
             parameters=self.parameters,
+            command_type=self.command_type,
+            requires_user_approval=self.requires_user_approval,
+            requires_admin_approval=self.requires_admin_approval,
+            security_sensitive=self.security_sensitive,
+            reversible=self.reversible,
         )
 
 
@@ -100,13 +134,21 @@ def compute_manifest_hash(
     timeout_seconds: int,
     rollback_skill_id: str | None,
     parameters: Mapping[str, ParameterSpec] | Mapping[str, Mapping[str, Any]],
+    command_type: CommandType | str = CommandType.LOW_RISK_CHANGE,
+    requires_user_approval: bool = False,
+    requires_admin_approval: bool = False,
+    security_sensitive: bool = False,
+    reversible: bool = True,
 ) -> str:
     """Deterministic, order-independent hash over a manifest's policy fields.
 
     Callers pass either live ``ParameterSpec`` objects (in-process) or plain
     dicts (as decoded from the ``parameters`` JSON column) — both normalize
     to the same canonical form so a value round-tripped through storage
-    hashes identically to the value that produced it.
+    hashes identically to the value that produced it. The five safety-gate
+    keyword arguments default to what every manifest stored before this
+    field existed implicitly was, so re-seeding pre-existing skills through
+    the same call sites (``seed.py``) reproduces the identical hash.
     """
     normalized_parameters = {
         name: {
@@ -126,6 +168,11 @@ def compute_manifest_hash(
             "timeout_seconds": timeout_seconds,
             "rollback_skill_id": rollback_skill_id,
             "parameters": normalized_parameters,
+            "command_type": str(command_type),
+            "requires_user_approval": requires_user_approval,
+            "requires_admin_approval": requires_admin_approval,
+            "security_sensitive": security_sensitive,
+            "reversible": reversible,
         },
         sort_keys=True,
         separators=(",", ":"),

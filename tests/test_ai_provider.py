@@ -101,7 +101,30 @@ def test_valid_structured_response_parses_correctly():
     )
     proposal = provider.diagnose(EVIDENCE)
     assert proposal.suggested_skill_id == "service.restart"
-    assert proposal.confidence == 0.8
+    # The provider is never a trusted source of confidence (Phase 5,
+    # helpdesktool/confidence.py) -- even though this response claims 0.8,
+    # OpenAICompatibleProvider._parse discards it unconditionally. The real
+    # confidence is computed deterministically downstream from evidence, in
+    # api.py's diagnose_incident, not trusted from any provider's own claim.
+    assert proposal.confidence == 0.0
+
+
+def test_provider_supplied_confidence_is_always_discarded_regardless_of_value():
+    for claimed in (0.0, 0.5, 0.99, 1.0):
+        provider = _FixedResponseProvider(
+            json.dumps(
+                {
+                    "summary": "x",
+                    "likely_root_cause": "",
+                    "confidence": claimed,
+                    "suggested_skill_id": None,
+                    "suggested_parameters": {},
+                    "escalate": False,
+                    "escalation_reason": "",
+                }
+            )
+        )
+        assert provider.diagnose(EVIDENCE).confidence == 0.0
 
 
 def test_malformed_json_response_raises_provider_error():
