@@ -2497,6 +2497,57 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > configured. Not done: Teams/Google Chat adapters (same additive shape,
 > blocked on SDK choice/vendoring per the roadmap, not infrastructure).
 
+> **Milestone 18 — Phase 22 dependency/provenance audit (DONE,
+> 2026-08-20).** Pure documentation, no code changes: `docs/DEPENDENCY_AUDIT.md`,
+> `docs/THIRD_PARTY_LICENSES.md`, `docs/SOFTWARE_PROVENANCE.md`. Every
+> figure in all three is directly queried from the real installed
+> environment (`importlib.metadata`'s `License-Expression` field per
+> Python package, each npm package's own `package.json` `license` field,
+> `pip-audit`/`npm audit` actually run) — nothing guessed or copied from
+> memory.
+>
+> - **Zero known CVEs** in any dependency `pyproject.toml`/
+>   `frontend/package.json` actually declares (`pip-audit`'s only finding
+>   is against `pip` itself, the installer tool, not a project
+>   dependency; `npm audit --audit-level=high` reports 0). Reconfirms the
+>   `cryptography` upper-bound fix from Milestone 6 is still holding.
+> - **`psycopg` is LGPL-3.0-only** — the one non-permissive dependency in
+>   the whole tree (everything else is MIT/BSD/Apache-2.0). Flagged
+>   explicitly with what that obligation actually means (only triggers if
+>   `psycopg`'s own source were modified and redistributed, which this
+>   project doesn't do) rather than silently lumped in with the permissive
+>   licenses.
+> - **Runtime remote-code-execution check, done directly not assumed:**
+>   grepped every HTTP client call across `helpdesktool/`, `linux_agent/`,
+>   `windows_agent/`, `agent_common/` and confirmed each falls into one of
+>   three categories (control-plane/agent structured API calls, the
+>   advisory AI provider call whose response is validated as structured
+>   text never executed, and the endpoint agent's own local `/proc`/
+>   `psutil`/`winreg` reads) — none fetches content and executes it.
+> - **One real, deliberate exception documented rather than hidden:**
+>   `deploy/install-linux-agent.sh`'s default `--package-source` installs
+>   via `pip install git+https://...` against this repo's own default
+>   branch (no PyPI release exists yet — the script's own comment already
+>   says so). `SOFTWARE_PROVENANCE.md` explains precisely why this is a
+>   conventional, human-triggered install step (a fixed Git ref chosen by
+>   whoever runs the installer) and not the *dynamic, request-influenced*
+>   remote-code-execution path Phase 1/7's safety invariants actually
+>   guard against — no request, AI response, or chat message can
+>   influence what gets installed.
+> - **Real gap surfaced, not silently fixed:** `pyproject.toml` declares
+>   `license = "Apache-2.0"` but there is no `LICENSE` file at the repo
+>   root. Deliberately not auto-created — the correct license text needs a
+>   real copyright holder name and year, which is the repository owner's
+>   decision, not something to invent. Flagged in
+>   `THIRD_PARTY_LICENSES.md` and the maturity gap analysis for a human
+>   decision, consistent with the mandate's own "genuine legal/license
+>   issue" stop condition — this alone doesn't block other work, so it's
+>   surfaced rather than treated as a hard stop.
+>
+> No SBOM (CycloneDX/SPDX) was generated — a manually-compiled equivalent
+> for the current dependency set, not a substitute for tooling that
+> would stay current automatically; tracked as real P5 future work.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
