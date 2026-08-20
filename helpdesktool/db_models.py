@@ -511,6 +511,15 @@ class ConnectorRequest(Base):
     requester -- enforced in ``api.py`` exactly like action approval)
     decides. Decision fields are inline here rather than reusing the
     ``approvals`` table, which is keyed to ``actions`` specifically.
+
+    ``step_up_code_hash``/``step_up_code_expires_at`` (migration 0018) back
+    a second, independent identity check for high-risk operations: the
+    requester must retrieve a short-lived code through their own
+    authenticated web-console session and hand it to their approver out of
+    band, so an approver can never approve blind off a channel-native
+    identity claim alone -- see ``api.py``'s ``decide_connector_request``.
+    Only the hash is ever persisted, matching ``EnrollmentToken.
+    token_hash``'s exact pattern.
     """
 
     __tablename__ = "connector_requests"
@@ -535,6 +544,10 @@ class ConnectorRequest(Base):
     result_success: Mapped[bool | None] = mapped_column(Boolean)
     result_detail: Mapped[str | None] = mapped_column(Text)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    step_up_code_hash: Mapped[str | None] = mapped_column(String(64))
+    step_up_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

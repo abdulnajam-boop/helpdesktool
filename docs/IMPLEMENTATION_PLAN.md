@@ -2863,6 +2863,65 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`'s updated row); outbound Slack
 > replies remain BLOCKED-EXTERNAL as before.
 
+> **Milestone 26 — step-up verification for high-risk connector requests
+> (DONE, 2026-08-20).** Directly answers the mandate's priority-3
+> instruction: "complete secure application/account-recovery connector
+> functionality, including step-up verification architecture. Never
+> authorize password resets from a name/email/employee ID typed into
+> chat." Auditing `conversation.py`/`api.py`'s existing approval flow
+> found the separation-of-duties rule (an approver other than the
+> requester) was real, but on its own left a genuine gap: an approver
+> could still click "approve" with nothing to independently confirm the
+> requester is who the original channel identity claims — a compromised
+> or misconfigured `ChannelIdentityLink` would sail straight through.
+>
+> **What's new:** migration `0018_connector_request_step_up` adds
+> `ConnectorRequest.step_up_code_hash`/`step_up_code_expires_at` (only the
+> SHA-256 hash is ever stored, mirroring `EnrollmentToken.token_hash`'s
+> exact precedent — the raw code exists only in the one response that
+> generates it). `GET /v1/connector-requests/{id}/step-up-code` (new,
+> `api.py`) mints a fresh 9-digit code, 10-minute expiry, and is
+> restricted to exactly the request's own `requested_by` user id — the
+> real security property is that *reaching this endpoint at all* requires
+> an independently authenticated call, separate from whatever channel
+> (chat, Slack, Google Chat) created the request in the first place.
+> `POST /v1/connector-requests/{id}/decision` now calls
+> `_verify_connector_request_step_up_code` before approving (never for
+> `deny`, which executes nothing): missing code, wrong code, and expired
+> code are all refused closed (403), and a correct code is consumed
+> immediately so it can never be replayed against a second decision
+> attempt. `schemas.py`'s `ConnectorRequestDecision` gained an optional
+> `step_up_code` field; `connector_request_json` exposes only a boolean
+> `step_up_code_pending`, never the hash or the code itself.
+> `conversation.py`'s reply text for a newly-created high-risk request now
+> tells the requester they need to retrieve their own code before an
+> admin can approve it.
+>
+> **Tests:** `tests/test_connector_step_up.py` (8 new tests: no-code
+> refusal, wrong-code refusal, only-the-requester-can-generate, correct
+> code succeeds, single-use consumption verified via a direct DB read,
+> expired-code refusal, deny never needs a code, and generating a code
+> for an already-decided request is refused). Three existing
+> `tests/test_conversation.py` tests that previously approved a high-risk
+> `ConnectorRequest` without a code were updated to generate and supply
+> one first — a genuine behavior change to an existing flow, not just new
+> coverage, so those tests had to change to keep testing the real
+> contract rather than a stale one. `ruff`/`ruff format --check`/
+> `mypy --strict`/`python -m compileall` clean; full `pytest` suite
+> re-run against both SQLite and a real disposable Postgres container
+> (`alembic upgrade head` confirmed both new columns exist with the right
+> types) with only the same 4 known pre-existing Windows-only failures —
+> no new failures, no new regressions in either tier.
+>
+> Not done, explicitly separate scope: this closes the *technical*
+> gap (an approver cannot approve blind off a bare identity claim) but
+> does not implement a real out-of-band delivery mechanism (SMS, a
+> physical badge check, a manager phone call) for how the code actually
+> reaches the approver from the requester — that hand-off is assumed to
+> happen through some existing trusted human channel (the same "call your
+> IT admin" trust boundary every real-world helpdesk already relies on),
+> not something this pass invents infrastructure for.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

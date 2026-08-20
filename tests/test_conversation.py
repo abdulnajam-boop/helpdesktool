@@ -172,10 +172,40 @@ def test_full_password_reset_pipeline_end_to_end(client):
         admin_id = admin.id
     admin_headers = {"X-Tenant-ID": identity["tenant_id"], "X-User-ID": admin_id}
 
+    # Approving a high-risk request requires a step-up code only the
+    # original requester can generate (via their own authenticated call).
+    no_code = http.post(
+        f"/v1/connector-requests/{request_id}/decision",
+        headers=admin_headers,
+        json={"decision": "approve", "reason": "no code yet"},
+    )
+    assert no_code.status_code == 403
+
+    step_up = http.get(
+        f"/v1/connector-requests/{request_id}/step-up-code", headers=owner_headers
+    )
+    assert step_up.status_code == 201, step_up.text
+    code = step_up.json()["step_up_code"]
+
+    wrong_code = http.post(
+        f"/v1/connector-requests/{request_id}/decision",
+        headers=admin_headers,
+        json={
+            "decision": "approve",
+            "reason": "wrong code",
+            "step_up_code": "000000000",
+        },
+    )
+    assert wrong_code.status_code == 403
+
     approved = http.post(
         f"/v1/connector-requests/{request_id}/decision",
         headers=admin_headers,
-        json={"decision": "approve", "reason": "confirmed identity"},
+        json={
+            "decision": "approve",
+            "reason": "confirmed identity",
+            "step_up_code": code,
+        },
     )
     assert approved.status_code == 200, approved.text
     body = approved.json()
@@ -187,7 +217,7 @@ def test_full_password_reset_pipeline_end_to_end(client):
     replay = http.post(
         f"/v1/connector-requests/{request_id}/decision",
         headers=admin_headers,
-        json={"decision": "approve", "reason": "replay"},
+        json={"decision": "approve", "reason": "replay", "step_up_code": code},
     )
     assert replay.status_code == 409
 
@@ -359,10 +389,19 @@ def test_unresolvable_target_account_fails_closed(client):
         session.commit()
         admin_id = admin.id
     admin_headers = {"X-Tenant-ID": identity["tenant_id"], "X-User-ID": admin_id}
+    step_up = http.get(
+        f"/v1/connector-requests/{request_id}/step-up-code",
+        headers=requester_headers,
+    )
+    assert step_up.status_code == 201, step_up.text
     decided = http.post(
         f"/v1/connector-requests/{request_id}/decision",
         headers=admin_headers,
-        json={"decision": "approve", "reason": "ok"},
+        json={
+            "decision": "approve",
+            "reason": "ok",
+            "step_up_code": step_up.json()["step_up_code"],
+        },
     )
     assert decided.status_code == 200
     assert decided.json()["status"] == "failed"

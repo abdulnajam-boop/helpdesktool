@@ -131,6 +131,10 @@ class ConnectorConfigCreate(BaseModel):
 class ConnectorRequestDecision(BaseModel):
     decision: Literal["approve", "deny"]
     reason: str = Field(default="", max_length=2000)
+    # Required to approve a high-risk request (never for "deny", which
+    # executes nothing) -- see api.py's decide_connector_request and
+    # migration 0018's docstring for the step-up verification this closes.
+    step_up_code: str | None = Field(default=None, min_length=6, max_length=64)
 
 
 class EvidenceRequirementCreate(BaseModel):

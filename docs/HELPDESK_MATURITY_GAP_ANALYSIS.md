@@ -32,6 +32,7 @@ Priority tiers, per the governing mandate:
 | Knowledge/research text becoming directly executable | **STRUCTURALLY CLOSED, NOW ACTUALLY EXERCISED (not just absent).** The knowledge schema now exists (Milestone 13) and holds real content (Milestone 14's 10 reference issues) — `validate_remediation_skill_references` is the concrete enforcement: a `DiagnosticStep.remediation_skill_id` must already be a real, registered skill or registration fails closed (422), proven by both a unit test and a live-Postgres API call rejecting a fake skill id. Still true: no code path anywhere turns arbitrary text (a ticket, a chat message, a CVE description) into anything that resolves a `remediation_skill_id` automatically — that would be the actual knowledge-ingestion pipeline (P4), still not built. |
 | Windows agent installer never run end-to-end | **BLOCKED-EXTERNAL** — needs a disposable Administrator-rights Windows host; see the architecture audit's §2. |
 | Real (non-mock) application connectors | **BLOCKED-EXTERNAL** — needs real per-application credentials (Entra ID, Google Workspace, Okta, Salesforce, GitHub). |
+| Account-recovery step-up verification (never authorize a password reset from a name/email/employee ID typed into chat) | **CLOSED this pass (Milestone 26)** — `conversation.py`'s existing separation-of-duties rule (an approver other than the requester) is real but was not, on its own, proof the requester is who the channel claims: an approver could still approve blind off nothing but the original channel-native identity link. Migration `0018` adds a short-lived, single-use, hashed step-up code (`ConnectorRequest.step_up_code_hash`, mirroring `EnrollmentToken.token_hash`'s exact pattern) the requester must retrieve through a *separate, independently authenticated* call (`GET /v1/connector-requests/{id}/step-up-code`) and hand to their approver out of band — reaching that endpoint at all requires an authenticated session distinct from whatever chat message created the request. `POST /v1/connector-requests/{id}/decision` refuses to approve (never "deny", which executes nothing) without the correct, unexpired code — fails closed on missing/wrong/expired in every case, proven by 8 new tests (`tests/test_connector_step_up.py`). |
 
 ## P1 — Architectural foundations
 
@@ -125,7 +126,7 @@ itself from going stale relative to it:
   closing the diagnosis-only half of Phase 14's simulation-mode
   requirement.
 
-## What changed in Milestones 22-25
+## What changed in Milestones 22-26
 
 - (docs) Refreshed this document against Milestones 13-21 (Milestone 22);
   no code changes.
@@ -163,6 +164,14 @@ itself from going stale relative to it:
   `ChannelWorkspaceLink`/`ChannelIdentityLink` needed no new migration —
   their `channel` column was already a plain string, not a Slack-specific
   enum.
+- (P0) **Account-recovery step-up verification (Milestone 26)** — closes
+  the mandate's explicit safety directive on never authorizing a
+  credential-affecting operation from a chat-native identity claim alone.
+  A short-lived, single-use, hashed step-up code the requester must
+  retrieve through a separate authenticated call now gates approval of
+  every high-risk connector request, on top of the pre-existing
+  separation-of-duties rule (an approver other than the requester) —
+  neither alone was sufficient; both are now required.
 
 Continuing into the next highest-priority item per the mandate's explicit
 instruction not to stop between phases.
