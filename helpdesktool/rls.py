@@ -18,7 +18,7 @@ either of two things is true for the current database session:
    session is torn down, so a pooled connection can never leak one request's
    tenant context into an unrelated later request.
 2. ``current_setting('app.rls_bypass', true)`` equals ``'on'``. This is a
-   narrow escape hatch used in exactly four situations, all documented
+   narrow escape hatch used in exactly five situations, all documented
    where they set it:
 
    - ``helpdesktool.webhook_worker``, a trusted, non-request-driven process
@@ -45,11 +45,18 @@ either of two things is true for the current database session:
      request. Never touches ``audit_events`` (see that module's docstring
      for why deleting hash-chained rows is a different, harder problem this
      worker deliberately does not attempt).
+   - ``helpdesktool.connector_request_reaper``, a trusted, non-request-
+     driven process (like ``lease_reaper``) that finds ``ConnectorRequest``
+     rows stuck ``pending_approval`` past ``Settings.
+     connector_request_stale_after_hours`` across every tenant and marks
+     them ``expired`` — see that module's docstring for why this is a
+     staleness sweep, not a claim/lease recovery like ``lease_reaper``
+     (a ``ConnectorRequest`` has no agent claim step to lose).
 
    No other code path in ``helpdesktool.api`` sets this GUC — that
    additional invariant is enforced by review/grep, not a runtime check, so
    any future change that sets it from request-handling code outside these
-   four named call sites should be treated as a security regression.
+   five named call sites should be treated as a security regression.
 
 Both ``ENABLE ROW LEVEL SECURITY`` and ``FORCE ROW LEVEL SECURITY`` are
 applied, but neither is sufficient by itself. PostgreSQL superusers and any

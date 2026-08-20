@@ -46,7 +46,7 @@ Priority tiers, per the governing mandate:
 | Gap | Status |
 |---|---|
 | Durable execution journal crash recovery | Unit/integration-tested (`tests/test_execution_journal.py`); a genuinely killed-and-restarted agent process was verified manually in an earlier session pass, not repeated this pass (no code changed there). Real future work: an automated (not manual) crash-recovery test harness. |
-| Idempotency/loop prevention for the *new* connector-request pipeline | **PARTIAL** — `ConnectorRequest` has no retry/bounded-attempt logic yet (unlike `Action`, which `lease_reaper.py` bounds via `Settings.lease_reaper_max_attempts`); a stuck `pending_approval` connector request has no equivalent reaper. Real, scoped gap. |
+| Idempotency/loop prevention for the *new* connector-request pipeline | **CLOSED** — `helpdesktool/connector_request_reaper.py` (`helpdesk-connector-request-reaper` entry point/Compose service) sweeps `ConnectorRequest` rows stuck `pending_approval` past `Settings.connector_request_stale_after_hours` (default 24h) and marks them `expired` with an audit event. Not a claim/lease recovery like `lease_reaper` (a connector request has no agent claim step to lose) — a staleness sweep on "no approver ever decided," with no auto-retry (a still-wanted request is resubmitted by a human). |
 | mTLS / certificate lifecycle | Evaluated and deliberately deferred in an earlier pass (documented reasoning in `IMPLEMENTATION_PLAN.md`); unchanged this pass. |
 
 ## P3 — Automation

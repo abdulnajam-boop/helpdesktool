@@ -37,6 +37,7 @@ helpdesk-windows-agent = "windows_agent.agent:main"
 helpdesk-windows-agent-service = "windows_agent.service:main"
 helpdesk-webhook-worker = "helpdesktool.webhook_worker:main"
 helpdesk-lease-reaper = "helpdesktool.lease_reaper:main"
+helpdesk-connector-request-reaper = "helpdesktool.connector_request_reaper:main"
 helpdesk-retention-worker = "helpdesktool.retention_worker:main"
 helpdesk-seed = "helpdesktool.seed:seed"
 
