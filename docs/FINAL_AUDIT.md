@@ -86,7 +86,7 @@ session's claim.
 | RBAC (backend authoritative) | **Verified** | Role-gated endpoints confirmed to 403 for under-privileged roles including in new approval-bypass tests |
 | Tenant isolation / RLS | **Verified, database- and API-layer** | Pre-existing `postgres_rls_*` fixture-based tests plus two new cross-tenant tests (action decision, job claim) this pass |
 | Agent installers (Linux) | **Verified end-to-end in a prior session pass** | Real systemd-in-Docker run, not repeated this pass (no reason to believe it regressed — installer scripts unchanged since) |
-| Agent installers (Windows) | **Syntax-validated only; runtime BLOCKED-EXTERNAL** | No Windows runtime available in this or any prior pass in this environment |
+| Agent installers (Windows) | **Real registry/service-manager logic verified live on genuine Windows; full installer runtime BLOCKED-EXTERNAL** | This pass ran on a real Windows 11 host with `pywin32` present (not previously available): `windows_agent.collectors._dns_servers_from_registry`/`installed_applications`/`pending_reboot`/`collect_inventory` all executed for real against the live registry (174 real installed applications enumerated, a genuine pending-reboot correctly detected); `Win32ServiceManager.query_state` executed a real, read-only Service Control Manager query against the `Spooler` service; `mypy --strict --platform win32 windows_agent` and `PSScriptAnalyzer` (installed fresh this pass) both ran clean against `deploy/install-windows-agent.ps1`/`uninstall-windows-agent.ps1` (0 errors, only stylistic `Write-Host` warnings, appropriate for an interactive installer). **Not run this pass or any prior pass:** the installer script's actual service-account creation, NTFS ACL lockdown, and Windows Service installation — deliberately not attempted, since the only Windows host available in this environment is the operator's own primary, non-disposable machine and the installer requires Administrator elevation and creates persistent system state; running it there without being asked would be an inappropriate, unrequested modification to a real personal machine, not a technical limitation. See Release Readiness for the exact disposable-VM validation a human must still perform. |
 | Security hardening (headers, rate limiting, request-size limits) | **Verified** | `helpdesktool/hardening.py`, `tests/test_hardening.py`; re-confirmed present on live responses during the fresh deployment run |
 | CI (dependency/secret/container scanning) | **Green** | `security` and `docker` jobs both passing on current `main` |
 | Database migrations | **Verified reversible, not just forward-only** | Real downgrade-to-base/upgrade-to-head round trip this pass |
@@ -129,9 +129,13 @@ Everything in the "Not built" row of the table above, plus:
 
 - No independent third-party penetration test.
 - No load/stress testing under sustained concurrent adversarial traffic.
-- Windows agent installer has never been run against a real Windows host in
-  any pass of this project — every verification of it has been static
-  (PowerShell AST parsing, `mypy --platform win32`).
+- The Windows agent installer *script* (service account creation, NTFS ACL
+  lockdown, Windows Service installation) has never been run end-to-end —
+  static validation only (PowerShell AST parsing, `PSScriptAnalyzer`,
+  `mypy --platform win32`). This pass did, however, run the agent's actual
+  registry-collection and Service Control Manager query code for real
+  against a genuine Windows host (see the table above) — a real gap
+  remains, but a narrower one than "nothing has ever touched real Windows."
 - OIDC has never been exercised against a real identity provider — every
   verification has been against a locally generated RSA keypair simulating
   one.
