@@ -2788,6 +2788,81 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > `escalate` — each would need its own safety analysis before a real
 > executor is worth building, not a batch conversion.
 
+> **Milestone 25 — Google Chat channel adapter, the second omnichannel
+> channel and the first with a real synchronous reply (DONE, 2026-08-20).**
+> Continues the mandate's priority-2 instruction ("complete the omnichannel
+> path: ... then Teams and Google Chat adapters using the existing shared
+> Conversation Service"). Google Chat was picked over Teams first because
+> its request-verification contract is well-documented and stable enough
+> to implement with real confidence; Teams' Bot Framework inbound JWT
+> claim shape (specifically whether a `sub` claim is guaranteed present,
+> since that token authenticates the Connector Service rather than a
+> human user) needs validating against a live Bot Framework registration
+> before it can be built with the same confidence — attempting it without
+> that would risk shipping a subtly wrong security-critical verification
+> path, which is worse than not shipping it yet. Documented as the
+> explicit next channel in `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`.
+>
+> **What's real:**
+> - `helpdesktool/channels/google_chat.py`: `verify_google_chat_request`
+>   validates the inbound `Authorization: Bearer <token>` header by
+>   reusing `helpdesktool.oidc.OIDCVerifier` completely unchanged —
+>   Google Chat's Bearer token is a standard RS256-signed JWT against a
+>   published JWKS (issuer `chat@system.gserviceaccount.com`, JWKS at
+>   `https://www.googleapis.com/service_accounts/v1/jwk/
+>   chat@system.gserviceaccount.com`), so this is a configuration change
+>   (issuer/JWKS/audience), not new crypto code — the exact "swap
+>   providers, not code" property `oidc.py`'s own docstring already
+>   describes, now proven true for a second, non-human-login use.
+> - `parse_google_chat_event` extracts `MESSAGE` events (ignoring
+>   `ADDED_TO_SPACE`/`REMOVED_FROM_SPACE`, which carry no message text).
+>   Google Chat has no Slack-style bot-echo loop to filter: a synchronous
+>   reply is rendered directly as this app's own response, never
+>   redelivered to the webhook as a new inbound event.
+> - `build_google_chat_reply` returns the JSON body Google Chat renders
+>   synchronously as this app's reply — **the first channel adapter in
+>   this codebase whose reply path is not BLOCKED-EXTERNAL.** Slack still
+>   needs a live bot token and a separate `chat.postMessage` call
+>   (`SlackReplySender`); Google Chat's HTTP endpoint contract lets an app
+>   reply in the same response it's already holding open, so
+>   `POST /v1/channels/google-chat/events/{link_id}` closes the full
+>   identity → conversation → ticket → reply loop with zero external
+>   credential dependency.
+> - No new migration: `ChannelWorkspaceLink`/`ChannelIdentityLink`'s
+>   `channel` column (migration 0015) was already a plain string, not a
+>   Slack-specific enum, so both tables work unchanged for a second
+>   provider. `schemas.py`'s `ChannelWorkspaceLinkCreate`/
+>   `ChannelIdentityLinkCreate` were widened from `Literal["slack"]` to
+>   `Literal["slack", "google_chat"]`, and `signing_secret_ref` validation
+>   became channel-conditional (required + shape-checked for `slack`,
+>   must be empty for `google_chat` — a JWKS-verified channel has no
+>   shared secret to store, so accepting one that would never be used
+>   would be a silent no-op waiting to confuse an operator).
+>
+> **Tests:** `tests/test_channels_google_chat.py` (pure-function:
+> verification success/failure — wrong audience, wrong issuer, wrong
+> signing key, missing/malformed bearer header — plus event parsing),
+> mirroring `tests/test_oidc.py`'s existing self-generated-RSA-keypair
+> pattern (`tests/support.py`'s `generate_test_keypair`/
+> `StaticKeyResolver`/`mint_token`) rather than inventing a new one.
+> `tests/test_channels_google_chat_api.py` (integration, monkeypatching
+> `api.build_google_chat_verifier` to inject the same test key resolver):
+> invalid-token rejection, unknown-link 404, non-message-event
+> acknowledgement, unmapped-user synchronous reply with no ticket created,
+> mapped-user ticket creation with a synchronous reply, and replay
+> idempotency (same reply returned, not reprocessed). `ruff`/
+> `ruff format --check`/`mypy --strict`/`python -m compileall` clean; full
+> `pytest` suite re-run against both SQLite and a real disposable Postgres
+> container (`alembic upgrade head`, then the full suite with
+> `HELPDESK_TEST_DATABASE_URL` set) with only the same 4 known
+> pre-existing Windows-only failures (plus one known-flaky Windows-local
+> webhook-redirect test noted in `CLAUDE.md`, not a regression) — no new
+> failures.
+>
+> Not done: Microsoft Teams (see above for why, and
+> `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`'s updated row); outbound Slack
+> replies remain BLOCKED-EXTERNAL as before.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

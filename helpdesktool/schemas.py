@@ -1,7 +1,8 @@
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .events import EventType
 
@@ -194,16 +195,41 @@ class DiagnosticWorkflowCreate(BaseModel):
     steps: list[DiagnosticStepCreate] = Field(min_length=1, max_length=50)
 
 
+_SLACK_SIGNING_SECRET_REF_PATTERN = re.compile(
+    r"^env:HELPDESK_SLACK_SIGNING_SECRET_[A-Z0-9_]+$"
+)
+
+
 class ChannelWorkspaceLinkCreate(BaseModel):
-    channel: Literal["slack"]
+    channel: Literal["slack", "google_chat"]
     workspace_id: str = Field(min_length=1, max_length=200)
-    signing_secret_ref: str = Field(
-        pattern=r"^env:HELPDESK_SLACK_SIGNING_SECRET_[A-Z0-9_]+$", max_length=255
-    )
+    # Slack authenticates with a per-workspace shared HMAC secret, so
+    # signing_secret_ref is required and shape-checked. Google Chat
+    # authenticates with a Google-signed Bearer JWT verified against a
+    # fixed, provider-published JWKS (helpdesktool.channels.google_chat) --
+    # there is no shared secret to store, so this field must stay empty
+    # rather than accepting one that would never actually be used.
+    signing_secret_ref: str = Field(default="", max_length=255)
+
+    @model_validator(mode="after")
+    def _validate_signing_secret_ref_matches_channel(
+        self,
+    ) -> "ChannelWorkspaceLinkCreate":
+        if self.channel == "slack":
+            if not _SLACK_SIGNING_SECRET_REF_PATTERN.match(self.signing_secret_ref):
+                raise ValueError(
+                    "slack requires signing_secret_ref matching "
+                    "env:HELPDESK_SLACK_SIGNING_SECRET_*"
+                )
+        elif self.channel == "google_chat" and self.signing_secret_ref:
+            raise ValueError(
+                "google_chat uses JWT/JWKS verification; signing_secret_ref must be empty"
+            )
+        return self
 
 
 class ChannelIdentityLinkCreate(BaseModel):
-    channel: Literal["slack"]
+    channel: Literal["slack", "google_chat"]
     provider_user_id: str = Field(min_length=1, max_length=200)
     user_id: str
 
