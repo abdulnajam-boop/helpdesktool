@@ -67,6 +67,7 @@ from .models import ActionRequest, ExecutionResult, RiskLevel, SkillDefinition
 from .orchestrator import ActionOrchestrator
 from .persistence import SqlActionStore, SqlAuditLog
 from .policy import PolicyEngine
+from .reporting import build_report
 from .schemas import (
     ActionCreate,
     ApprovalDecision,
@@ -983,6 +984,26 @@ def dashboard(
         "recent_tickets": [ticket_json(row) for row in recent_tickets],
         "recent_actions": [action_json(row) for row in recent_actions],
     }
+
+
+@app.get("/v1/reports/summary")
+def report_summary(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Operational report for a period -- see ``reporting.py``'s module
+    docstring for exactly what each figure means and where it comes from.
+    Defaults to the trailing 7 days when ``start``/``end`` are omitted; pass
+    both explicitly (e.g. midnight-to-midnight) to generate a daily report.
+    """
+    period_end = _aware(end) if end else datetime.now(UTC)
+    period_start = _aware(start) if start else period_end - timedelta(days=7)
+    try:
+        return build_report(session, principal.tenant_id, period_start, period_end)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 @app.get("/v1/incidents")

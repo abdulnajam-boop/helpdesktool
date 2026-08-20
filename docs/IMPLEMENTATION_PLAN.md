@@ -1304,7 +1304,9 @@ to the same standard as the Linux path.
 > - **Frontend Reporting page not built this pass** — real, separately-
 >   scoped work (a dashboard-quality reporting UI) this milestone's
 >   original scope bundled in but this pass judged better done as its own
->   dedicated milestone rather than rushed as an add-on here.
+>   dedicated milestone rather than rushed as an add-on here. **Update
+>   2026-08-20: done** — see "Cross-cutting: operational reporting layer"
+>   below (`GET /v1/reports/summary` plus `frontend/src/pages/Reports.tsx`).
 >   List-endpoint pagination, the other item originally bundled into this
 >   milestone, **was** closed — as part of Milestone 10's data-lifecycle
 >   work instead, since that's where the rest of the "bounded storage/
@@ -1793,6 +1795,77 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > (ruff, ruff format, mypy strict, pytest) both locally on SQLite and in a
 > `python:3.13` Linux container against a real Postgres 17 container
 > matching CI, after the `cryptography` bump.
+
+---
+
+### Cross-cutting: operational reporting layer (DONE, 2026-08-20)
+
+> **Actual completion status: DONE for this pass.** Closes Section 8's
+> "autonomous help desk manager" reporting requirement and Milestone 6's
+> deferred frontend Reporting page in one piece of work, since the backend
+> endpoint and the page that renders it only make sense built together.
+>
+> **What was actually built:**
+> - `helpdesktool/reporting.py` (new): `build_report(session, tenant_id,
+>   start, end)` computes, strictly scoped to `[start, end)` unless noted:
+>   **incidents** (detected, resolved, reopened, MTTR in seconds — from
+>   `Incident.first_observed_at`/`resolved_at` pairs, averaged in Python
+>   rather than via DB-specific interval arithmetic, so the same code path
+>   is correct on both SQLite and PostgreSQL — plus `open_now`, a current
+>   snapshot, not period-bound); **tickets** (opened, resolved, `open_now`);
+>   **remediation** (attempts/succeeded/failed/success_rate/rollback
+>   attempted+succeeded, read directly off `ExecutionResultRow`'s plain
+>   boolean columns rather than parsing audit-event JSON — simpler and
+>   portable); **approvals** (approved/denied counts and average
+>   time-to-decision, joining `Approval.decided_at` back to the
+>   originating `Action.created_at`); **devices** (a current online/offline
+>   snapshot, using the same `DEVICE_ONLINE_THRESHOLD` the dashboard and
+>   `/metrics` already use); **security** (policy denials vs. operator/
+>   approval denials); and the top 10 **recurring incidents** by
+>   `occurrence_count`.
+> - The security split is the one genuinely non-obvious piece: `Action.
+>   status == "denied"` is set by *both* `PolicyEngine` (outright, before
+>   any approval step) and `ActionOrchestrator.deny()` (an operator
+>   rejecting a pending action) — see `orchestrator.py` — so the status
+>   column alone can't distinguish them. `_security_stats` instead uses an
+>   anti-join: an operator denial always has a matching `Approval` row (the
+>   approval endpoint is what creates one); a policy denial never reaches
+>   that step and never has one. `policy_denials` = denied actions in
+>   period with no `Approval` row at all; `approval_denials` = `Approval`
+>   rows in period with `decision == "deny"`.
+> - No stored daily-snapshot table and no new scheduled worker — every
+>   figure is recomputed fresh from the database on each call, mirroring
+>   `metrics.py`'s "scrape-time aggregate query, never a manually
+>   incremented counter" rationale for the identical reason: it can never
+>   drift from what's actually in the database. An external scheduler can
+>   call the same endpoint on a cron if a stored history across many past
+>   periods is ever needed — not built this pass.
+> - `GET /v1/reports/summary` (`api.py`): optional `start`/`end` query
+>   params (default: trailing 7 days), `require_user` (any authenticated
+>   role, same access level as `/v1/audit` — reporting is read-only and not
+>   role-restricted beyond tenant membership), 400 on `end <= start`.
+> - `frontend/src/pages/Reports.tsx` (new): a period selector (24h/7d/30d/
+>   90d) that just changes the request path — no client-side aggregation,
+>   the endpoint always returns a complete answer for whatever period was
+>   asked for. Wired into `App.tsx`'s navigation between Skills and Audit.
+>
+> **Tests:** `tests/test_reporting.py` (6 cases) — a full
+> ticket→action→approve→claim→execute→verify workflow through the real API
+> and asserting the report reflects it exactly (remediation success rate,
+> approval count/timing, ticket/device counts); the policy-denial-vs-
+> approval-denial anti-join, exercised through both real paths (an
+> unregistered `skill_id` for the former, an admin explicitly denying a
+> pending action for the latter) rather than asserted against the SQL
+> directly; the default trailing-7-days window; an explicit period; a
+> rejected inverted period; and an authentication requirement. Full suite
+> passing (ruff, ruff format, mypy strict, pytest) both locally on SQLite
+> and in a `python:3.13` Linux container against a real Postgres 17
+> container matching CI. Frontend: `npm run typecheck`, `npm test`, and
+> `npm run build` all pass with the new page. Not verified in an actual
+> browser (no browser-automation tooling available in this pass) — verified
+> instead by the backend test suite exercising the exact data the page
+> renders, plus a clean TypeScript compile and production bundle build;
+> flagged here rather than silently assumed.
 
 ---
 
