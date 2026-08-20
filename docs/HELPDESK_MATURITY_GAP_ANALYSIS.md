@@ -74,7 +74,7 @@ Priority tiers, per the governing mandate:
 | OpenTelemetry tracing | Evaluated, deliberately deferred (documented in an earlier pass). |
 | Terraform / staging / production deployment | Not started; current deployment story is `docker compose`, independently verified fresh-from-zero in an earlier pass. |
 | SBOM / release signing | Not started. |
-| Dependency/provenance audit (`docs/DEPENDENCY_AUDIT.md` etc.) | Not started this pass. |
+| Dependency/provenance audit (`docs/DEPENDENCY_AUDIT.md` etc.) | **DONE** — `docs/DEPENDENCY_AUDIT.md`, `docs/THIRD_PARTY_LICENSES.md`, `docs/SOFTWARE_PROVENANCE.md`. Zero known CVEs in any declared dependency (`pip-audit`/`npm audit` both clean, matching CI); `psycopg`'s LGPL-3.0 license flagged explicitly (the one non-permissive dependency); no runtime remote-code-execution path found anywhere (checked directly, not assumed). **Real gap surfaced, not fixed:** `pyproject.toml` declares `license = "Apache-2.0"` but no `LICENSE` file exists at the repo root — deliberately not auto-created (needs a real copyright holder name/year, the repo owner's call) — flagged for a human decision, per the mandate's own stop condition for genuine license issues. |
 
 ## What changed this pass, in priority order
 
