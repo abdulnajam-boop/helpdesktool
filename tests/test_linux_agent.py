@@ -3,9 +3,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from linux_agent.agent import LinuxAgent
+from linux_agent.client import ApiError
 from linux_agent.config import AgentConfig
 from linux_agent.executor import DnsFlushCacheExecutor, ServiceRestartExecutor
-from tests.support import agent_signing_public_key_pem, build_signed_job_envelope
+from tests.support import agent_signing_public_keys, build_signed_job_envelope
 
 
 def build_agent(tmp_path: Path, *, runner=None) -> LinuxAgent:
@@ -17,8 +18,7 @@ def build_agent(tmp_path: Path, *, runner=None) -> LinuxAgent:
         "device-1",
         "token",
         allowed_services=("demo.service",),
-        signing_public_key_pem=agent_signing_public_key_pem(),
-        signing_key_version=1,
+        signing_public_keys=agent_signing_public_keys(),
     )
     agent = LinuxAgent(config, tmp_path / "agent.json")
     if runner is not None:
@@ -122,6 +122,103 @@ def test_rejects_when_no_signing_key_is_pinned(tmp_path):
     assert (
         "no pinned job-signing key" in agent.execute_job(envelope, job_id=None)["error"]
     )
+
+
+class _FakeSigningKeyClient:
+    def __init__(self, responses: list[dict | Exception]) -> None:
+        self._responses = iter(responses)
+        self.calls = 0
+
+    def request(self, method, path, *, payload=None, headers=None):
+        self.calls += 1
+        value = next(self._responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    @staticmethod
+    def agent_headers(token, idempotency_key=None):
+        return {"Authorization": f"Bearer {token}"}
+
+
+def test_ensure_signing_key_adds_a_newly_rotated_version_without_losing_the_old_one(
+    tmp_path,
+):
+    fake_client = _FakeSigningKeyClient(
+        [{"signing_public_keys": {"1": "pem-v1", "2": "pem-v2"}}]
+    )
+    config = AgentConfig(
+        "http://localhost",
+        "agent-1",
+        "tenant-1",
+        "user",
+        "device-1",
+        "token",
+        signing_public_keys={1: "pem-v1"},
+    )
+    agent = LinuxAgent(config, tmp_path / "agent.json", client=fake_client)
+
+    agent.ensure_signing_key()
+
+    assert agent.config.signing_public_keys == {1: "pem-v1", 2: "pem-v2"}
+
+
+def test_ensure_signing_key_never_overwrites_an_already_pinned_version(tmp_path):
+    """Even if a compromised or misconfigured control plane returned a
+    *different* PEM for a version this agent already trusts, the agent
+    must ignore it -- never silently swap out a key version already
+    pinned."""
+    fake_client = _FakeSigningKeyClient(
+        [{"signing_public_keys": {"1": "a-completely-different-pem"}}]
+    )
+    config = AgentConfig(
+        "http://localhost",
+        "agent-1",
+        "tenant-1",
+        "user",
+        "device-1",
+        "token",
+        signing_public_keys={1: "pem-v1"},
+    )
+    agent = LinuxAgent(config, tmp_path / "agent.json", client=fake_client)
+
+    agent.ensure_signing_key()
+
+    assert agent.config.signing_public_keys == {1: "pem-v1"}
+
+
+def test_ensure_signing_key_tolerates_a_failed_refresh_when_a_key_is_already_cached(
+    tmp_path,
+):
+    fake_client = _FakeSigningKeyClient([ApiError("network blip")])
+    config = AgentConfig(
+        "http://localhost",
+        "agent-1",
+        "tenant-1",
+        "user",
+        "device-1",
+        "token",
+        signing_public_keys={1: "pem-v1"},
+    )
+    agent = LinuxAgent(config, tmp_path / "agent.json", client=fake_client)
+
+    agent.ensure_signing_key()  # must not raise
+
+    assert agent.config.signing_public_keys == {1: "pem-v1"}
+
+
+def test_ensure_signing_key_propagates_a_failed_refresh_with_no_cached_key(tmp_path):
+    fake_client = _FakeSigningKeyClient([ApiError("network blip")])
+    config = AgentConfig(
+        "http://localhost", "agent-1", "tenant-1", "user", "device-1", "token"
+    )
+    agent = LinuxAgent(config, tmp_path / "agent.json", client=fake_client)
+
+    try:
+        agent.ensure_signing_key()
+        raise AssertionError("expected ApiError to propagate")
+    except ApiError:
+        pass
 
 
 def test_successful_execution_journals_every_transition(tmp_path):
@@ -265,8 +362,9 @@ def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
             "device_id": "device-42",
             "tenant_id": "tenant-42",
             "agent_token": "secret-token",
-            "signing_public_key_pem": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n",
-            "signing_key_version": 1,
+            "signing_public_keys": {
+                "1": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n"
+            },
         }
     )
     agent = LinuxAgent(config, config_path, client=fake_client)
@@ -279,8 +377,9 @@ def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
     assert agent.config.device_id == "device-42"
     assert agent.config.tenant_id == "tenant-42"
     assert agent.config.agent_token == "secret-token"
-    assert agent.config.signing_public_key_pem is not None
-    assert "BEGIN PUBLIC KEY" in agent.config.signing_public_key_pem
+    assert agent.config.signing_public_keys == {
+        1: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n"
+    }
     reloaded = AgentConfig.load(config_path)
     assert reloaded.tenant_id == "tenant-42"
     assert reloaded.device_id == "device-42"

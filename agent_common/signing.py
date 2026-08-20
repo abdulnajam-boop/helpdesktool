@@ -42,7 +42,7 @@ import base64
 import binascii
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -100,7 +100,7 @@ def verify_signature(
 def verify_envelope(
     envelope: dict[str, Any],
     *,
-    public_key_pem: str,
+    public_keys: Mapping[int, str],
     expected_device_id: str,
     expected_tenant_id: str,
     supported_skill_versions: dict[str, frozenset[int]],
@@ -108,11 +108,25 @@ def verify_envelope(
 ) -> None:
     """Raises ``EnvelopeError`` with a specific reason on the first failed
     check; returns normally only once every check has passed.
+
+    ``public_keys`` maps a *signing key* version (``helpdesktool.
+    job_signing``'s per-version derivation, distinct from ``skill_version``
+    below) to the PEM the agent currently trusts for that version -- see
+    ``linux_agent/agent.py``/``windows_agent/agent.py``'s
+    ``ensure_signing_key`` for how an agent builds and maintains this set
+    across a key rotation's transition window. An envelope whose
+    ``key_version`` isn't in this set is treated identically to one with an
+    invalid signature (fails the same check, same error message) rather
+    than a distinct failure mode -- there is no meaningful difference
+    between "wrong key" and "unknown key" from the verifier's perspective.
     """
     missing = REQUIRED_ENVELOPE_FIELDS - set(envelope)
     if missing:
         raise EnvelopeError(f"malformed job envelope: missing {sorted(missing)}")
-    if not verify_signature(envelope, str(envelope["signature"]), public_key_pem):
+    candidate_key = public_keys.get(envelope["key_version"])
+    if candidate_key is None or not verify_signature(
+        envelope, str(envelope["signature"]), candidate_key
+    ):
         raise EnvelopeError("invalid job envelope signature")
     if envelope["device_id"] != expected_device_id:
         raise EnvelopeError("job envelope is addressed to a different device")

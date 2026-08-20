@@ -191,7 +191,10 @@ def test_full_autonomous_helpdesk_lifecycle(postgres_client, oidc_test_keypair):
 
     verify_envelope(
         claim.json(),
-        public_key_pem=enrolled.json()["signing_public_key_pem"],
+        public_keys={
+            int(version): pem
+            for version, pem in enrolled.json()["signing_public_keys"].items()
+        },
         expected_device_id=device_id,
         expected_tenant_id=tenant_id,
         supported_skill_versions={

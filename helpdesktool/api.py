@@ -86,7 +86,7 @@ from .hardening import (
 )
 from .incidents import detect_inventory_incidents, incident_json
 from .integrations import validate_webhook_url
-from .job_signing import CURRENT_KEY_VERSION, public_key_pem, sign_envelope
+from .job_signing import active_public_keys, sign_envelope
 from .knowledge import (
     CveReference,
     DiagnosticStep,
@@ -502,6 +502,21 @@ def create_tenant(
     return {"tenant_id": tenant.id, "admin_user_id": user.id}
 
 
+def _active_signing_keys() -> dict[int, str]:
+    """The version -> PEM map every agent-facing endpoint that hands out
+    signing keys should return -- one place expressing the current
+    rotation window (``helpdesktool.job_signing``'s module docstring),
+    consumed identically by device enrollment and the dedicated
+    signing-key refresh endpoint.
+    """
+    settings = get_settings()
+    return active_public_keys(
+        settings.job_signing_seed,
+        settings.job_signing_key_version,
+        settings.job_signing_key_rotation_window,
+    )
+
+
 @app.post("/v1/devices/enroll", status_code=201)
 def enroll_device(
     body: DeviceEnroll,
@@ -535,8 +550,7 @@ def enroll_device(
     return {
         "device_id": device.id,
         "agent_token": token,
-        "signing_public_key_pem": public_key_pem(get_settings().job_signing_seed),
-        "signing_key_version": CURRENT_KEY_VERSION,
+        "signing_public_keys": _active_signing_keys(),
     }
 
 
@@ -685,8 +699,7 @@ def enroll_device_with_token(
         "device_id": device.id,
         "tenant_id": enrollment.tenant_id,
         "agent_token": device_token,
-        "signing_public_key_pem": public_key_pem(get_settings().job_signing_seed),
-        "signing_key_version": CURRENT_KEY_VERSION,
+        "signing_public_keys": _active_signing_keys(),
     }
 
 
@@ -2835,16 +2848,17 @@ def agent_signing_key(
     device_id: str,
     principal: Principal = Depends(require_agent),
 ) -> dict[str, Any]:
-    """Lets an already-enrolled agent (re)fetch the current job-signing
-    public key via trust-on-first-use, for agents enrolled before this
-    endpoint existed or that need to re-pin after clearing a stale key. New
-    enrollments get this directly in their enrollment response instead —
-    see ``enroll_device``/``enroll_device_with_token``.
+    """Lets an already-enrolled agent refresh its locally-trusted
+    signing-key set via trust-on-first-use. Called every agent cycle now
+    (``linux_agent``/``windows_agent``'s ``ensure_signing_key``), not just
+    once, so a key rotated on the control plane (bumping
+    ``Settings.job_signing_key_version``) is picked up automatically within
+    one heartbeat interval -- see ``helpdesktool/job_signing.py``'s module
+    docstring for the rotation model. New enrollments get the same
+    ``signing_public_keys`` map directly in their enrollment response
+    instead -- see ``enroll_device``/``enroll_device_with_token``.
     """
-    return {
-        "key_version": CURRENT_KEY_VERSION,
-        "public_key_pem": public_key_pem(get_settings().job_signing_seed),
-    }
+    return {"signing_public_keys": _active_signing_keys()}
 
 
 @app.get("/v1/devices/{device_id}/jobs")
@@ -2936,9 +2950,13 @@ def claim_job(
         "issued_at": now.isoformat(),
         "expires_at": row.lease_expires_at.isoformat(),
         "nonce": secrets.token_hex(16),
-        "key_version": CURRENT_KEY_VERSION,
+        "key_version": get_settings().job_signing_key_version,
     }
-    envelope["signature"] = sign_envelope(envelope, get_settings().job_signing_seed)
+    envelope["signature"] = sign_envelope(
+        envelope,
+        get_settings().job_signing_seed,
+        get_settings().job_signing_key_version,
+    )
     result: dict[str, Any] = {
         **envelope,
         "id": row.id,
