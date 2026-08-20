@@ -196,7 +196,7 @@ cd frontend && npm install && npm run typecheck && npm test && npm run build
 cd .. && docker compose config && docker compose build
 ```
 
-CI (`.github/workflows/ci.yml`) runs three independent jobs from the repository manifests: `backend` (the Python checks above), `frontend` (typecheck/test/build), and `docker` (builds the API and frontend Docker images and actually runs each one -- not just `docker build` -- specifically to catch startup failures a build alone can't).
+CI (`.github/workflows/ci.yml`) runs four independent jobs from the repository manifests: `backend` (the Python checks above), `frontend` (typecheck/test/build), `security` (`gitleaks` secret scanning, `pip-audit` for backend dependency CVEs, `npm audit --audit-level=high` for frontend dependency CVEs), and `docker` (builds the API and frontend Docker images, scans each with `trivy` for fixable CRITICAL/HIGH vulnerabilities, then actually runs each one -- not just `docker build` -- specifically to catch startup failures a build alone can't).
 
 ## Shutdown and reset
 
@@ -225,6 +225,7 @@ This section is kept current as of 2026-08-20; see `docs/IMPLEMENTATION_PLAN.md`
 - **The frontend has no route-level automated test coverage** beyond the OIDC/PKCE login-flow logic (`frontend/src/auth/oidc.test.ts`) -- no React Testing Library component tests yet, and no accessibility audit has been done.
 - **No frontend Reporting page.** `/v1/devices`, `/v1/tickets`, `/v1/actions`, and `/v1/incidents` now accept `limit`/`offset` (default `limit=100`, capped at 500) so none of them can return an unbounded result set, but there's no frontend pager UI or `total`-count response shape yet — that's real, separately-scoped work.
 - **No OpenTelemetry tracing.** Structured JSON logs with per-request correlation ids and Prometheus metrics exist; distributed tracing does not (no OTLP collector target has been chosen).
+- **The API rate limiter is per-process, in-memory.** A real, complete guarantee for this platform's default single-API-process `compose.yaml` topology, but a multi-replica production deployment needs a shared store (e.g. Redis) or gateway-level limiting for a consistent limit across replicas -- not built yet.
 - The MVP detects and verifies low-disk recovery but does not ship an unsafe generic disk-cleanup command. A future cleanup skill must define exact safe targets, permission, verification, and rollback/escalation behavior.
 - `service.restart` is the only mutating reference executor. It is appropriate for exercising policy/approval/job/verification/rollback, not for claiming that restarting a service fixes disk usage. Adding a genuinely new mutating skill always requires an agent code change -- the skill registry can declare policy metadata for a skill id, but never ships new execution logic, by design.
 - Production billing, RAG, advanced ticketing integrations, and Kubernetes deployment are intentionally deferred and out of scope for this MVP.

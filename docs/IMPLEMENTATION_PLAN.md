@@ -1687,6 +1687,115 @@ configurable approval policy, and exportable/auditable compliance evidence.
 
 ---
 
+### Cross-cutting: API-layer security hardening and CI security gates (DONE, 2026-08-20)
+
+> **Actual completion status: DONE for this pass.** Response headers,
+> request-size limiting, and a per-process rate limiter now sit in front of
+> every request; `/docs`/`/redoc`/`/openapi.json` are gated to development
+> only; and CI gained a dedicated `security` job (dependency scanning +
+> secret scanning) plus container image scanning in the existing `docker`
+> job. **Not done, deliberately out of scope this pass:** a distributed
+> (multi-replica-aware) rate limiter — see below — and CSRF protection,
+> which this API doesn't need today (no cookie-based session auth on
+> mutating endpoints; OIDC uses a `Bearer` token and dev auth's cookie is
+> itself gated to `environment == "development"`, so there's no ambient
+> credential a cross-site request could ride on).
+>
+> **What was actually built:**
+> - `helpdesktool/hardening.py` (new): `SecurityHeadersMiddleware`
+>   (`X-Content-Type-Options`, `X-Frame-Options: DENY`,
+>   `Referrer-Policy`, a restrictive `Content-Security-Policy` appropriate
+>   for a JSON API, `Permissions-Policy`, and `Strict-Transport-Security`
+>   outside development — HSTS is skipped in development because it would
+>   actively break plain-HTTP local dev by pinning the browser to HTTPS);
+>   `RequestSizeLimitMiddleware` (rejects a request whose declared
+>   `Content-Length` exceeds `Settings.request_max_body_bytes`, default
+>   10 MiB, before the body is ever read); `RateLimitMiddleware` (in-process
+>   per-client-IP sliding window, `Settings.rate_limit_max_requests`/
+>   `rate_limit_window_seconds`, default 300/60s, `/health/*` and
+>   `/metrics` exempt). Honestly documented as a single-process guarantee,
+>   not a distributed one — this platform's default `compose.yaml` topology
+>   runs one API process, so it's a complete guarantee for that topology; a
+>   multi-replica deployment needs a shared store (Redis) or gateway-level
+>   limiting instead, not built this pass.
+> - The rate limiter is constructed with `enabled=False` whenever
+>   `Settings.environment == "development"` (`api.py`) — without this, the
+>   entire pytest suite shares one process-wide `app` instance and
+>   therefore one limiter, so the suite's own aggregate request volume
+>   could spuriously trip 429s on later tests. Caught and fixed *before*
+>   it could ship as a flaky-test time bomb, not after.
+> - `helpdesktool/api.py`: `docs_url`/`redoc_url`/`openapi_url` are now
+>   `None` outside development — previously always enabled at their
+>   default paths regardless of environment, needlessly exposing the full
+>   API schema in production.
+> - `helpdesktool/config.py`: added `rate_limit_max_requests`,
+>   `rate_limit_window_seconds`, `request_max_body_bytes`.
+> - **Dependency fix found while wiring in `pip-audit` as a pre-check**:
+>   `pyproject.toml`'s own `cryptography>=42,<46` upper bound (added in the
+>   signed-job-envelopes milestone) was blocking every fixed version of 15
+>   known `cryptography` CVEs (PYSEC-2026-35/36/2141/3552/3553/3554,
+>   GHSA-537c-gmf6-5ccf) affecting the `45.0.7` release pip was resolving
+>   to — a self-inflicted regression from adding an upper bound that was
+>   never revisited. Fixed: widened to `cryptography>=48.0.1,<51`;
+>   `pip-audit` now reports zero vulnerabilities in project dependencies
+>   (the only remaining findings are in `pip` itself, the installer tool,
+>   not a `pyproject.toml` dependency).
+> - `.github/workflows/ci.yml`: new `security` job — `gitleaks-action@v2`
+>   (secret scanning across full commit history via `fetch-depth: 0`; free
+>   for this public repo, no license needed), `pip-audit` against the
+>   installed backend dependency set, `npm audit --audit-level=high`
+>   against the frontend. The existing `docker` job gained
+>   `aquasecurity/trivy-action@v0.36.0` scans of both built images
+>   (`CRITICAL,HIGH`, `exit-code: 1`, `ignore-unfixed: true`) immediately
+>   after each `docker build` step, before the runtime smoke test.
+> - **Container image findings the trivy gate immediately surfaced and
+>   fixed, verified locally with `trivy image` before ever relying on
+>   CI to catch it:**
+>   - `Dockerfile` (API image) was single-stage and shipped `pip` (with
+>     its own vendored `msgpack` and `pkg_resources`/`setuptools` copies —
+>     see `pip`'s `vendor.txt`) straight into the runtime image, flagged
+>     HIGH by trivy (GHSA-6v7p-g79w-8964, CVE-2025-47273) even though
+>     nothing at runtime imports either. Rewritten as a multi-stage build:
+>     a `builder` stage installs into `/opt/venv` then
+>     `pip uninstall -y pip setuptools wheel` from that venv before it's
+>     copied into the `runtime` stage; the runtime stage *also* runs
+>     `python -m pip uninstall -y pip` against `python:3.13-slim`'s own
+>     preinstalled `/usr/local` pip (a second, separate copy from the
+>     venv's — easy to miss, confirmed by rescanning after the first fix
+>     still showed the same two findings). Console scripts (`uvicorn`,
+>     `alembic`, `helpdesk-seed`, etc.) are plain files with a
+>     venv-`python` shebang and keep working with no pip present at all —
+>     verified by actually starting the rebuilt image and curling
+>     `/health/live`, not just asserting it should work. `apt-get upgrade`
+>     added to the runtime stage for the base Debian image's own OS
+>     package CVEs (`bsdutils`/`libblkid1` etc., CVE-2026-53615).
+>   - `frontend/Dockerfile`'s final stage (`nginx:1.27-alpine`) was a
+>     stale pinned tag carrying 35 fixable OS-package CVEs (2 CRITICAL, 33
+>     HIGH — `libxml2`, `musl`, `nghttp2`, `zlib`). Bumped to
+>     `nginx:1.31-alpine` (latest published alpine tag) and added
+>     `apk update && apk upgrade --no-cache` in that stage so the image
+>     keeps picking up Alpine security patches released after this tag on
+>     every rebuild, not only when the pinned tag is next bumped by hand.
+>   - Both fixes verified with a real `docker build` + `trivy image
+>     --severity CRITICAL,HIGH --ignore-unfixed` locally (zero findings on
+>     both images afterward) and a real `docker run` + health-check curl
+>     against each rebuilt image, before pushing — the same
+>     build-then-actually-run discipline that caught the Dockerfile's
+>     missing `agent_common` `COPY` earlier this session.
+>
+> **Tests:** `tests/test_hardening.py` (12 cases — 9 isolated middleware
+> unit tests against a minimal standalone Starlette app covering headers
+> present/HSTS-gated, request-size accept/reject, rate-limit allow/deny/
+> exempt-paths/disabled/spoofable-header-ignored, plus 3 integration tests
+> against the real `helpdesktool.api` app confirming headers are actually
+> wired in, `/docs` reachable in dev, and the rate limiter's dev-mode
+> bypass genuinely holds against a non-exempt path). Full suite passing
+> (ruff, ruff format, mypy strict, pytest) both locally on SQLite and in a
+> `python:3.13` Linux container against a real Postgres 17 container
+> matching CI, after the `cryptography` bump.
+
+---
+
 ## Open questions to resolve before autonomous execution starts
 
 1. **Target cloud/deployment substrate for Milestone 8** — Kubernetes/Helm vs. a

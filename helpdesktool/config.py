@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     inventory_retention_days: int = 90
     idempotency_record_retention_days: int = 7
     retention_worker_poll_seconds: float = 3600.0
+    # helpdesktool/hardening.py. Defaults are generous (won't interrupt
+    # normal browser/agent traffic) rather than aggressive; tune per actual
+    # observed traffic. The rate limiter is in-process memory -- an honest,
+    # complete guarantee for this platform's default single-API-process
+    # deployment topology, not for a multi-replica one (see that module's
+    # docstring).
+    rate_limit_max_requests: int = 300
+    rate_limit_window_seconds: float = 60.0
+    request_max_body_bytes: int = 10 * 1024 * 1024
     # Empty by default: /metrics is unrestricted at the application layer,
     # matching how Prometheus scraping is conventionally secured (network
     # policy / reverse proxy, not an app-level secret). Set this to require

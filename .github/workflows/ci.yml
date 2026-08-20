@@ -49,12 +49,46 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans commit history, not just the working tree.
+          fetch-depth: 0
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -e '.[dev,windows]'
+      - run: python -m pip install pip-audit
+      - name: Audit backend Python dependencies
+        run: python -m pip_audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Audit frontend npm dependencies
+        working-directory: frontend
+        run: |
+          npm install
+          npm audit --audit-level=high
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build the API image
         run: docker build -t helpdesktool-api:ci .
+      - name: Scan the API image for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: helpdesktool-api:ci
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
       - name: Smoke-test the API image actually starts and serves traffic
         # Catches import-time/startup failures that a plain `docker build`
         # can't (a bad COPY list, a missing package -- exactly the class of
@@ -74,6 +108,13 @@ jobs:
           [ -n "$ok" ] || (echo "API container never became healthy" && exit 1)
       - name: Build the frontend image
         run: docker build -t helpdesktool-frontend:ci ./frontend
+      - name: Scan the frontend image for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: helpdesktool-frontend:ci
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
       - name: Smoke-test the frontend image serves the app
         run: |
           docker run -d --name frontend-smoke -p 3000:80 helpdesktool-frontend:ci
