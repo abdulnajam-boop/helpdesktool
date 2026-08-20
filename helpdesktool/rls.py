@@ -91,6 +91,10 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "domain_events",
     "webhook_subscriptions",
     "webhook_deliveries",
+    "application_connectors",
+    "conversations",
+    "conversation_messages",
+    "connector_requests",
 )
 
 # Tables the application role needs ordinary DML on but that are not

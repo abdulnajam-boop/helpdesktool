@@ -26,11 +26,18 @@ from .auth import (
     resolving_identity,
 )
 from .config import get_settings
+from .connectors import ConnectorRegistry
+from .connectors.mock import MockApplicationConnector
+from .conversation import handle_message
 from .database import get_session, set_tenant_context
 from .db_models import (
     Action,
+    ApplicationConnectorConfig,
     Approval,
     AuditEventRow,
+    ConnectorRequest,
+    Conversation,
+    ConversationMessage,
     Device,
     DeviceInventory,
     Diagnosis,
@@ -71,6 +78,9 @@ from .reporting import build_report
 from .schemas import (
     ActionCreate,
     ApprovalDecision,
+    ChatMessageCreate,
+    ConnectorConfigCreate,
+    ConnectorRequestDecision,
     DeviceEnroll,
     DeviceRevoke,
     EnrollmentTokenCreate,
@@ -304,6 +314,16 @@ def remember(
             status_code=status_code,
         )
     )
+
+
+# The application connector registry (helpdesktool/connectors/__init__.py).
+# "mock" is always registered -- the dev-safe default with no external
+# credentials required, same role as ai/provider.py's
+# DeterministicFallbackProvider. A real connector (Salesforce, Microsoft
+# 365, ...) registers here too once implemented; nothing about the API
+# layer above changes to add one.
+CONNECTOR_REGISTRY = ConnectorRegistry()
+CONNECTOR_REGISTRY.register("mock", MockApplicationConnector)
 
 
 @app.get("/health/live")
@@ -1287,6 +1307,280 @@ def list_approvals(
         .order_by(Action.created_at)
     ).all()
     return [action_json(row) for row in rows]
+
+
+def conversation_json(
+    row: Conversation, messages: list[ConversationMessage]
+) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "channel": row.channel,
+        "status": row.status,
+        "ticket_id": row.ticket_id,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "intent": m.intent,
+                "created_at": m.created_at,
+            }
+            for m in messages
+        ],
+    }
+
+
+def connector_request_json(row: ConnectorRequest) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "conversation_id": row.conversation_id,
+        "connector_id": row.connector_id,
+        "operation": row.operation,
+        "target_email": row.target_email,
+        "requested_by": row.requested_by,
+        "risk": row.risk,
+        "status": row.status,
+        "decided_by": row.decided_by,
+        "decision_reason": row.decision_reason,
+        "decided_at": row.decided_at,
+        "result_success": row.result_success,
+        "result_detail": row.result_detail,
+        "verified": row.verified,
+        "created_at": row.created_at,
+    }
+
+
+@app.post("/v1/chat/message", status_code=201)
+def send_chat_message(
+    body: ChatMessageCreate,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """The web channel adapter: the caller's already-authenticated session
+    *is* the resolved channel identity (no separate identity-resolution
+    step needed here, unlike a future Slack/Teams/Google Chat adapter,
+    which would call ``identity_resolution.resolve_channel_identity``
+    against its own signature-verified provider identity first).
+    """
+    user = session.get(User, principal.actor_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
+    if body.conversation_id:
+        tenant_row(session, Conversation, body.conversation_id, principal.tenant_id)
+    result = handle_message(
+        session,
+        principal.tenant_id,
+        user,
+        channel="web",
+        channel_thread_id=body.conversation_id or "",
+        message=body.message,
+        conversation_id=body.conversation_id,
+    )
+    session.commit()
+    return {
+        "conversation_id": result.conversation_id,
+        "reply": result.reply,
+        "ticket_id": result.ticket_id,
+        "connector_request_id": result.connector_request_id,
+    }
+
+
+@app.get("/v1/conversations")
+def list_conversations(
+    limit: int = 100,
+    offset: int = 0,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    limit, offset = _clamp_pagination(limit, offset)
+    query = select(Conversation).where(Conversation.tenant_id == principal.tenant_id)
+    if principal.role not in {"owner", "admin"}:
+        query = query.where(Conversation.user_id == principal.actor_id)
+    rows = session.scalars(
+        query.order_by(Conversation.updated_at.desc()).offset(offset).limit(limit)
+    ).all()
+    return [conversation_json(row, []) for row in rows]
+
+
+@app.get("/v1/conversations/{conversation_id}")
+def get_conversation(
+    conversation_id: str,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    row = tenant_row(session, Conversation, conversation_id, principal.tenant_id)
+    if principal.role not in {"owner", "admin"} and row.user_id != principal.actor_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "resource not found")
+    messages = session.scalars(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at)
+    ).all()
+    return conversation_json(row, list(messages))
+
+
+@app.post("/v1/connectors", status_code=201)
+def create_connector(
+    body: ConnectorConfigCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    if body.connector_type not in CONNECTOR_REGISTRY.known_types():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"unknown connector_type; must be one of {sorted(CONNECTOR_REGISTRY.known_types())}",
+        )
+    row = ApplicationConnectorConfig(
+        tenant_id=principal.tenant_id,
+        application_id=body.application_id,
+        display_name=body.display_name,
+        connector_type=body.connector_type,
+        config=body.config,
+        credential_ref=body.credential_ref,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "a connector for this application already exists"
+        ) from exc
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "connector.registered",
+        principal.actor_id,
+        {"application_id": row.application_id, "connector_type": row.connector_type},
+    )
+    result = {
+        "id": row.id,
+        "application_id": row.application_id,
+        "display_name": row.display_name,
+        "connector_type": row.connector_type,
+        "active": row.active,
+        "created_at": row.created_at,
+    }
+    session.commit()
+    return result
+
+
+@app.get("/v1/connectors")
+def list_connectors(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(ApplicationConnectorConfig).where(
+            ApplicationConnectorConfig.tenant_id == principal.tenant_id
+        )
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "application_id": row.application_id,
+            "display_name": row.display_name,
+            "connector_type": row.connector_type,
+            "active": row.active,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/v1/connector-requests")
+def list_connector_requests(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(ConnectorRequest)
+        .where(
+            ConnectorRequest.tenant_id == principal.tenant_id,
+            ConnectorRequest.status == "pending_approval",
+        )
+        .order_by(ConnectorRequest.created_at)
+    ).all()
+    return [connector_request_json(row) for row in rows]
+
+
+@app.post("/v1/connector-requests/{request_id}/decision")
+def decide_connector_request(
+    request_id: str,
+    body: ConnectorRequestDecision,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    row = tenant_row(session, ConnectorRequest, request_id, principal.tenant_id)
+    if row.status != "pending_approval":
+        raise HTTPException(status.HTTP_409_CONFLICT, "request is not pending approval")
+    if row.requested_by == principal.actor_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "requester cannot decide their own request"
+        )
+    row.decided_by = principal.actor_id
+    row.decision_reason = body.reason
+    row.decided_at = datetime.now(UTC)
+    if body.decision == "deny":
+        row.status = "denied"
+        audit(
+            session,
+            principal.tenant_id,
+            row.id,
+            "connector_request.denied",
+            principal.actor_id,
+            {"reason": body.reason},
+        )
+        session.commit()
+        return connector_request_json(row)
+
+    connector_config = tenant_row(
+        session, ApplicationConnectorConfig, row.connector_id, principal.tenant_id
+    )
+    connector = CONNECTOR_REGISTRY.create(connector_config.connector_type)
+    resolved = connector.resolve_user(row.target_email)
+    if not resolved.success:
+        row.status = "failed"
+        row.result_success = False
+        row.result_detail = resolved.detail
+        audit(
+            session,
+            principal.tenant_id,
+            row.id,
+            "connector_request.failed",
+            principal.actor_id,
+            {"reason": resolved.detail, "stage": "resolve_user"},
+        )
+        session.commit()
+        return connector_request_json(row)
+
+    external_user_id = str(resolved.data["external_user_id"])
+    operation_method = getattr(connector, row.operation)
+    execution = operation_method(external_user_id)
+    verification = connector.verify_result(external_user_id, row.operation)
+    row.status = "succeeded" if execution.success else "failed"
+    row.result_success = execution.success
+    row.result_detail = execution.detail
+    row.verified = verification.success
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "connector_request.executed"
+        if execution.success
+        else "connector_request.failed",
+        principal.actor_id,
+        {
+            "operation": row.operation,
+            "success": execution.success,
+            "verified": verification.success,
+        },
+    )
+    session.commit()
+    return connector_request_json(row)
 
 
 @app.post("/v1/actions", status_code=201)

@@ -416,3 +416,113 @@ class WebhookDelivery(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     response_status: Mapped[int | None] = mapped_column(Integer)
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ApplicationConnectorConfig(Base):
+    """A tenant's configured connector for one third-party application
+    (Salesforce, Microsoft 365, ...). ``credential_ref`` follows the exact
+    same environment-reference pattern as ``WebhookSubscription.secret_ref``
+    (see ``integrations.py``'s ``EnvironmentSecretsProvider``) -- never a
+    literal secret value in the database.
+    """
+
+    __tablename__ = "application_connectors"
+    __table_args__ = (UniqueConstraint("tenant_id", "application_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    application_id: Mapped[str] = mapped_column(String(100))
+    display_name: Mapped[str] = mapped_column(String(200))
+    connector_type: Mapped[str] = mapped_column(String(50))
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    credential_ref: Mapped[str] = mapped_column(String(255), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Conversation(Base):
+    """One chat thread across any channel (web, and future Slack/Teams/
+    Google Chat adapters) -- the shared orchestration record every channel
+    adapter feeds into, per CLAUDE.md's channel-adapter architecture.
+    """
+
+    __tablename__ = "conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(30), index=True)
+    channel_thread_id: Mapped[str] = mapped_column(String(255), default="")
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    ticket_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tickets.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    intent: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ConnectorRequest(Base):
+    """A single proposed connector operation, gated by policy exactly like
+    ``Action`` gates endpoint skills (``orchestrator.py``) -- read-only
+    operations (see ``connectors.READ_ONLY_OPERATIONS``) execute
+    immediately; high-risk ones (``connectors.HIGH_RISK_OPERATIONS``) sit
+    ``pending_approval`` until an independent approver (never the
+    requester -- enforced in ``api.py`` exactly like action approval)
+    decides. Decision fields are inline here rather than reusing the
+    ``approvals`` table, which is keyed to ``actions`` specifically.
+    """
+
+    __tablename__ = "connector_requests"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    connector_id: Mapped[str] = mapped_column(
+        ForeignKey("application_connectors.id", ondelete="CASCADE")
+    )
+    operation: Mapped[str] = mapped_column(String(50))
+    target_email: Mapped[str] = mapped_column(String(320))
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    risk: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(30), default="pending_approval")
+    decided_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_success: Mapped[bool | None] = mapped_column(Boolean)
+    result_detail: Mapped[str | None] = mapped_column(Text)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

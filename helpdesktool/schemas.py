@@ -90,6 +90,24 @@ class JobResult(BaseModel):
     rollback_succeeded: bool | None = None
 
 
+class ChatMessageCreate(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = None
+
+
+class ConnectorConfigCreate(BaseModel):
+    application_id: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9_.-]+$")
+    display_name: str = Field(min_length=1, max_length=200)
+    connector_type: str = Field(min_length=1, max_length=50)
+    config: dict[str, Any] = Field(default_factory=dict)
+    credential_ref: str = Field(default="", max_length=255)
+
+
+class ConnectorRequestDecision(BaseModel):
+    decision: Literal["approve", "deny"]
+    reason: str = Field(default="", max_length=2000)
+
+
 class WebhookSubscriptionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=1, max_length=2048)
