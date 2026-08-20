@@ -901,6 +901,26 @@ composes into a working product end to end, not just in isolation per-milestone.
 Directly satisfies Definition-of-Done items 1-19 as a single, repeatable,
 CI-enforced proof rather than a manual checklist.
 
+> **Extended 2026-08-20** to cover everything added to the trust chain
+> since the first version above, so this stays the single proof that
+> *everything* composes, not just the Milestone 1-3 slice: an advisory AI
+> diagnosis call between incident detection and the remediation proposal
+> (asserts `provider_name == "deterministic-fallback"`, since no AI
+> provider is configured in this test environment, and that no `Action`
+> exists yet — diagnosis is advisory-only, see `helpdesktool/ai/
+> provider.py`); real signed-job-envelope verification via
+> `agent_common.signing.verify_envelope` called against the *actual*
+> envelope `claim_job` returned and the device's real pinned public key
+> from its enrollment response (not just asserting the fields are present
+> — proves an agent could really validate this envelope and would accept
+> it); the operational report (`GET /v1/reports/summary`) reflecting the
+> exact same incident/ticket/remediation/approval counts the rest of the
+> test already proved happened; and `GET /metrics` exposing the expected
+> Prometheus series for the same activity. Verified locally against a real
+> Postgres 17 container (not just SQLite, since this test only runs
+> against `postgres_client`) and in the `python:3.13` Linux container tier
+> matching CI.
+
 ---
 
 ### Milestone 4 — Versioned, signed remediation skill registry
