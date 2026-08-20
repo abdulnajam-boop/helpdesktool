@@ -224,6 +224,44 @@ def test_get_nonexistent_issue_definition_is_404(client):
     assert response.status_code == 404
 
 
+def test_issue_definition_integrity_tampering_fails_closed_on_read(client):
+    """Directly editing a stored issue definition's policy-relevant field
+    (category, hash-covered per compute_issue_definition_hash) without
+    updating its content_hash -- bypassing POST /v1/knowledge/issues, e.g.
+    a compromised/errant direct database write -- must be detected and
+    block the read, not be silently trusted. Mirrors
+    test_skill_registry_api.py's test_manifest_integrity_tampering_fails_closed_on_action_create
+    for the skill registry's own content-hash model.
+    """
+    from helpdesktool.db_models import IssueDefinitionRow
+
+    http, factory = client
+    identity = _bootstrap_owner(http)
+    owner_headers = {
+        "X-Tenant-ID": identity["tenant_id"],
+        "X-User-ID": identity["admin_user_id"],
+    }
+    created = http.post(
+        "/v1/knowledge/issues",
+        headers=owner_headers,
+        json={
+            "issue_key": "tamper_target",
+            "title": "Tamper target",
+            "category": "disk",
+            "applicable_os": ["linux"],
+        },
+    ).json()
+
+    with factory() as session:
+        row = session.get(IssueDefinitionRow, created["id"])
+        row.category = "security"  # tampered without recomputing content_hash
+        session.commit()
+
+    response = http.get(f"/v1/knowledge/issues/{created['id']}", headers=owner_headers)
+    assert response.status_code == 500
+    assert "integrity" in response.json()["detail"]
+
+
 def test_knowledge_source_lifecycle(client):
     http, _ = client
     identity = _bootstrap_owner(http)

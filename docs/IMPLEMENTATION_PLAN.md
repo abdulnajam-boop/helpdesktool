@@ -2548,6 +2548,27 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > for the current dependency set, not a substitute for tooling that
 > would stay current automatically; tracked as real P5 future work.
 
+> **Milestone 19 — Phase 16 adversarial coverage: knowledge-registry
+> tamper test (DONE, 2026-08-20).** Closes a specific, named gap from an
+> earlier pass's own continuation checkpoint: a tampered-content-hash
+> integrity test analogous to the skill registry's existing
+> `test_manifest_integrity_tampering_fails_closed_on_action_create` had
+> never been written for `IssueDefinitionRow` (Milestone 13's knowledge
+> schema). Added
+> `test_issue_definition_integrity_tampering_fails_closed_on_read` to
+> `tests/test_knowledge_api.py`: registers a real issue definition via the
+> API, directly mutates its `category` field (hash-covered per
+> `compute_issue_definition_hash`) through the ORM without recomputing
+> `content_hash` — simulating a compromised/errant direct database write
+> — then confirms `GET /v1/knowledge/issues/{id}` fails closed with `500`
+> and an `"integrity"` message rather than silently serving the tampered
+> row. `organizational_baselines` (Milestone 15) has no equivalent
+> content-hash model to tamper-test — it's plain CRUD data, not an
+> integrity-checked registry like `skills`/`issue_definitions`, so this
+> class of test doesn't apply there. `ruff`/`ruff format --check`/
+> `mypy --strict` clean; full `pytest` suite re-run with only the 4 known
+> pre-existing Windows-only failures, no regressions.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
