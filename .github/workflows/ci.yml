@@ -76,6 +76,27 @@ jobs:
         run: |
           npm install
           npm audit --audit-level=high
+      - name: Generate backend SBOM (CycloneDX)
+        # The CVE gate already ran in the "Audit backend Python
+        # dependencies" step above -- this step's only job is producing
+        # the artifact, so it must not become a second, redundant gate.
+        # pip_audit still exits non-zero (and still writes the SBOM file
+        # correctly either way) whenever it finds a vulnerability in any
+        # installed package, including pip itself (the installer tool,
+        # not a project dependency -- see docs/DEPENDENCY_AUDIT.md); `||
+        # true` here is deliberate, not a swallowed real failure.
+        run: python -m pip_audit --format=cyclonedx-json -o sbom-backend.cdx.json || true
+      - name: Generate frontend SBOM (CycloneDX)
+        working-directory: frontend
+        run: npm sbom --sbom-format=cyclonedx > sbom-frontend.cdx.json
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom-backend.cdx.json
+            frontend/sbom-frontend.cdx.json
+          retention-days: 90
   docker:
     runs-on: ubuntu-latest
     steps:

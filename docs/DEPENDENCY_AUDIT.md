@@ -151,14 +151,23 @@ CI's `docker` job (`.github/workflows/ci.yml`) scans both built images
 CRITICAL/HIGH finding — this is an existing, already-running gate (see
 `CLAUDE.md`'s CI description), not new as of this pass.
 
-## 7. What this audit did not (and could not) do
+## 7. Machine-readable SBOM generation (now automated in CI)
 
-- **No SBOM (Software Bill of Materials) file was generated.** A
-  machine-readable SBOM (CycloneDX/SPDX) is real, tractable future work
-  (`docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`'s P5 tier) — this document is
-  a manually-compiled equivalent for the current dependency set, not a
-  substitute for tooling that would stay current automatically as
-  dependencies change.
+Since this document was first written, `.github/workflows/ci.yml`'s
+`security` job was extended to generate a real CycloneDX SBOM on every
+push/PR: `pip-audit --format=cyclonedx-json` for the backend, `npm sbom
+--sbom-format=cyclonedx` for the frontend, both uploaded as a 90-day build
+artifact (`sbom-<commit-sha>`) rather than committed to the repository —
+an SBOM is a snapshot of exact resolved versions, which goes stale the
+moment a dependency updates, so a build-time artifact that regenerates on
+every push is the correct place for it, not a tracked file this document
+(or anyone) would need to remember to keep in sync. The backend SBOM step
+deliberately does not re-gate CI on vulnerability findings (`|| true`) —
+that gate already ran in the preceding "Audit backend Python
+dependencies" step; the SBOM step's only job is producing the artifact.
+
+## 8. What this audit did not (and could not) do
+
 - **No dependency-confusion / typosquatting review was performed** beyond
   confirming every declared package resolves to its expected, well-known
   publisher on PyPI/npm — a deeper supply-chain review (package-signing

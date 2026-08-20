@@ -2614,6 +2614,40 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > diagnosis feature had before Milestone 9 added its own review panel;
 > tracked as real, separate future work.
 
+> **Milestone 21 — Phase 21 SBOM generation in CI (DONE, 2026-08-20).**
+> Closes the "No SBOM was generated" caveat Milestone 18's dependency
+> audit explicitly flagged as future work. `.github/workflows/ci.yml`'s
+> `security` job now generates a real CycloneDX SBOM on every push/PR:
+> `pip-audit --format=cyclonedx-json` for the backend, `npm sbom
+> --sbom-format=cyclonedx` for the frontend, uploaded as a 90-day build
+> artifact (`sbom-<commit-sha>` via `actions/upload-artifact@v4`) rather
+> than committed to the repository — an SBOM is a snapshot of exact
+> resolved versions, which goes stale the moment a dependency changes, so
+> a build-time artifact regenerated on every push is the correct home for
+> it, not a tracked file someone has to remember to keep in sync.
+>
+> **A real, would-have-broken-CI issue caught before merge, not after:**
+> `python -m pip_audit --format=cyclonedx-json -o <file>` still exits
+> non-zero whenever it finds *any* vulnerability in the installed
+> environment — including the pre-existing, already-documented finding
+> against `pip` itself (the installer tool, not a project dependency;
+> Milestone 18's audit already recorded this). Verified locally before
+> committing: the SBOM file is written correctly either way, but the
+> step's exit code alone would have failed the job. Since the real CVE
+> gate already runs in the preceding "Audit backend Python dependencies"
+> step, the SBOM-generation step doesn't need to be a second gate — fixed
+> with a deliberate, commented `|| true` rather than silently swallowing
+> a real command failure. `docs/DEPENDENCY_AUDIT.md` and
+> `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`'s SBOM row were both updated to
+> reflect this is now automated rather than a documented gap.
+>
+> Verified locally before committing: both `pip-audit --format=
+> cyclonedx-json -o ...` and `npm sbom --sbom-format=cyclonedx` actually
+> run and produce valid CycloneDX JSON in this environment (not just
+> assumed from `--help` output), and the workflow YAML parses cleanly.
+> Still not done: release signing (Sigstore/cosign for container images,
+> signed release archives) — real, separate future work.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

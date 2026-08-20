@@ -55,7 +55,7 @@ Compose brings up Postgres, runs Alembic migrations, idempotently seeds the Acme
 CI (`.github/workflows/ci.yml`) runs, as four independent jobs:
 - backend: `python -m compileall`, `ruff check .`, `ruff format --check .`, `mypy`, `pytest`
 - frontend: `npm install`, `npm run typecheck`, `npm test`, `npm run build` (in `frontend/`)
-- security: `gitleaks-action` (secret scanning across full history), `pip-audit` (backend dependency CVEs), `npm audit --audit-level=high` (frontend dependency CVEs) — see `helpdesktool/hardening.py` and its `docs/IMPLEMENTATION_PLAN.md` cross-cutting entry for the `cryptography` version-pin CVE this caught.
+- security: `gitleaks-action` (secret scanning across full history), `pip-audit` (backend dependency CVEs), `npm audit --audit-level=high` (frontend dependency CVEs), then generates a real CycloneDX SBOM for both (`pip-audit --format=cyclonedx-json`, `npm sbom --sbom-format=cyclonedx`) and uploads it as a 90-day build artifact (`sbom-<commit-sha>`) — not committed to the repo, since an SBOM goes stale the moment a dependency changes; see `docs/DEPENDENCY_AUDIT.md`. See `helpdesktool/hardening.py` and its `docs/IMPLEMENTATION_PLAN.md` cross-cutting entry for the `cryptography` version-pin CVE this caught.
 - docker: builds the API and frontend Docker images, scans each with `trivy` (fails on fixable CRITICAL/HIGH findings), then runs each one for real (curls `/health/live` / `/`) — catches import/startup failures a plain `docker build` can't; see `CLAUDE.md`'s Frontend section for the real bug this caught.
 
 Run the equivalent locally before considering backend or frontend work done.
