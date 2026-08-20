@@ -26,6 +26,16 @@ FROM nginx:1.31-alpine
 # self-healing on every rebuild rather than only when we remember to bump
 # the pinned tag above.
 RUN apk update && apk upgrade --no-cache
+# Re-declared here (ARGs don't cross the FROM boundary from the build stage
+# above) purely to compute the CSP's connect-src: the bundle in dist/ is
+# static JS that can only ever call the API origin and (if configured) the
+# OIDC issuer origin it was built against, so the policy is baked in at
+# image build time rather than left wide open.
+ARG VITE_API_URL=http://localhost:8000
+ARG VITE_OIDC_ISSUER=""
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+RUN CONNECT_SRC="'self' ${VITE_API_URL}"; \
+    if [ -n "${VITE_OIDC_ISSUER}" ]; then CONNECT_SRC="${CONNECT_SRC} ${VITE_OIDC_ISSUER}"; fi; \
+    sed -i "s#__CSP_CONNECT_SRC__#${CONNECT_SRC}#" /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80

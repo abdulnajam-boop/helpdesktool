@@ -1,7 +1,10 @@
 import hashlib
 import hmac
+import ipaddress
 import json
 import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
@@ -38,6 +41,68 @@ def test_webhook_url_rejects_credentials_private_network_and_http(monkeypatch):
         validate_webhook_url("https://user:pass@example.com/hook")
 
 
+@pytest.mark.parametrize(
+    "attacker_ip",
+    [
+        "127.0.0.1",  # loopback
+        "169.254.169.254",  # cloud instance metadata endpoint
+        "169.254.0.1",  # link-local, general
+        "10.0.0.5",  # RFC1918 private
+        "172.16.0.5",  # RFC1918 private
+        "192.168.1.5",  # RFC1918 private
+        "0.0.0.0",  # unspecified
+    ],
+)
+def test_webhook_url_rejects_every_non_global_ip_class(monkeypatch, attacker_ip):
+    assert not ipaddress.ip_address(attacker_ip).is_global  # sanity-check the fixture
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (attacker_ip, 443))
+        ],
+    )
+    with pytest.raises(ValueError, match="public IP"):
+        validate_webhook_url("https://attacker-controlled.example/hook")
+
+
+def test_webhook_delivery_refuses_to_follow_a_redirect_to_a_private_address():
+    """The real SSRF bypass this closes: validate_webhook_url only ever
+    checks the URL a subscription is registered with -- a webhook target
+    that returns a 3xx redirect could otherwise point the actual delivery
+    request anywhere (cloud metadata, localhost, an internal service) with
+    zero re-validation, since the default urllib opener follows redirects
+    transparently. Uses a real local HTTP server, not a mock, so this
+    proves the actual network behavior rather than an assumption about it.
+    """
+
+    class RedirectingHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib method name
+            self.send_response(302)
+            self.send_header(
+                "Location", "http://169.254.169.254/latest/meta-data/secret"
+            )
+            self.end_headers()
+
+        def log_message(self, *args):  # silence test output
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), RedirectingHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = SignedWebhookProvider().deliver(
+            f"http://127.0.0.1:{port}/hook", "event-1", b"{}", "secret", 3.0
+        )
+        # The redirect must be surfaced as-is (a 302 "delivery"), never
+        # silently followed to the attacker-chosen Location.
+        assert result.status_code == 302
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_webhook_url_accepts_public_https(monkeypatch):
     monkeypatch.setattr(
         socket,
@@ -64,12 +129,16 @@ def test_signed_webhook_uses_canonical_payload_and_hmac(monkeypatch):
         def read(self, limit):
             return b"accepted"
 
-    def fake_urlopen(request, timeout):
+    def fake_open(request, timeout):
         captured["request"] = request
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    # SignedWebhookProvider deliberately uses its own no-redirect opener
+    # rather than the module-level urlopen (see _NoRedirectHandler's
+    # docstring) -- patch that opener's .open, matching what the code
+    # actually calls.
+    monkeypatch.setattr("helpdesktool.integrations._NO_REDIRECT_OPENER.open", fake_open)
     payload = canonical_payload({"type": "ticket.created", "id": "event-1"})
     response = SignedWebhookProvider().deliver(
         "https://example.com/hook", "event-1", payload, "signing-secret", 4.0
