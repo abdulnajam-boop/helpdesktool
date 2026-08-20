@@ -10,6 +10,7 @@ import { Dashboard } from './pages/Dashboard'
 import { DeviceDetail, Devices } from './pages/Devices'
 import { IncidentDetail, Incidents } from './pages/Incidents'
 import { Integrations } from './pages/Integrations'
+import { Reports } from './pages/Reports'
 import { Settings } from './pages/Settings'
 import { Skills } from './pages/Skills'
 import { TicketDetail, Tickets } from './pages/Tickets'
@@ -23,6 +24,7 @@ const NAVIGATION = [
   ['/actions', 'Actions'],
   ['/approvals', 'Approvals'],
   ['/skills', 'Skills'],
+  ['/reports', 'Reports'],
   ['/audit', 'Audit'],
   ['/integrations', 'Integrations'],
   ['/settings', 'Settings'],
@@ -38,6 +40,7 @@ function Route({ user }: { user?: Row }) {
   if (resource === 'actions') return id ? <ActionDetail id={id} /> : <Actions user={user} />
   if (resource === 'approvals') return <Approvals user={user} />
   if (resource === 'skills') return <Skills user={user} />
+  if (resource === 'reports') return <Reports />
   if (resource === 'audit') return <Audit />
   if (resource === 'integrations') return <Integrations user={user} />
   if (resource === 'settings') return <Settings />
