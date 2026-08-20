@@ -2213,6 +2213,88 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > format --check`, `mypy --strict`, `pytest` — both locally and in the
 > `python:3.13`/Postgres 17 CI-matching container.
 
+> **Milestone 14 — Phase 13 reference skills content (DONE, 2026-08-20).**
+> Populates the Milestone 13 knowledge schema with a small, deliberately
+> curated set of reference `IssueDefinition`/`DiagnosticWorkflow` records —
+> "~5-10 excellent ones, not hundreds" per the roadmap's own Phase 13 —
+> matching its candidate list exactly: Windows/Linux disk space, Windows/
+> Linux service failure, Windows Update failure, DNS resolution, SSH auth
+> failure, high CPU, unauthorized software, and security-agent health (10
+> issues total). Shipped as data-only migration
+> `migrations/versions/0013_reference_knowledge.py` (revision id
+> pre-verified at 24 characters), which imports and calls
+> `helpdesktool.knowledge.compute_issue_definition_hash` directly — the
+> same "migration computes its content hash via the live application
+> function" pattern `0008_skill_registry` established for the skill
+> registry.
+>
+> Design decisions worth recording:
+> - **Grounded in real collector fields, not invented ones.** Every
+>   `evidence_requirements` entry names a field the real
+>   `linux_agent/collectors.py`/`windows_agent/collectors.py` actually
+>   produce today (e.g. `filesystems[].free_bytes`, `cpu.utilization_percent`,
+>   `network.dns_servers`, `services[].active`/`services[].sub`). Where no
+>   collector exists yet for a signal this roadmap's candidate list implies
+>   (Windows Update history, SSH auth-log correlation), the
+>   `collect_evidence` step says so explicitly rather than pretending the
+>   capability exists — see the migration's module docstring.
+> - **Only 3 of the 10 issues get a `remediate` step**
+>   (`windows_service_failure`, `linux_systemd_service_failure`,
+>   `security_agent_health_degraded`, the last two of which reference the
+>   same registered `service.restart` skill), because `service.restart` and
+>   `diagnostics.collect` remain the only two registered skills in this
+>   codebase. The other 7 issues' workflows terminate in `escalate` — this
+>   is intentional, not incomplete: "No generic disk-cleanup skill exists by
+>   design" is already documented in `CLAUDE.md`, and knowledge may
+>   never describe a remediation capability that doesn't actually exist
+>   (`validate_remediation_skill_references` would reject it outright if it
+>   tried).
+> - **Phase 15's corrections encoded as machine-readable knowledge, not
+>   only prose in an audit doc.** `dns_resolution_failure`'s
+>   `check_precondition` step explicitly states never to substitute a
+>   public resolver (8.8.8.8/1.1.1.1) for organizational DNS just because
+>   resolution is failing; `high_cpu_usage`'s step explicitly states that
+>   high CPU alongside a single other signal (e.g. an open mining port) is
+>   still insufficient evidence of compromise — both direct restatements of
+>   corrections `docs/KNOWLEDGE_BASE_AUDIT.md` calls out by name.
+> - **MITRE mappings on 3 issues (`ssh_auth_failure` → T1110,
+>   `unauthorized_software_detected` → T1204,
+>   `security_agent_health_degraded` → T1562.001) all carry a deliberately
+>   moderate `mapping_confidence` (0.3–0.4) and explicit `mapping_evidence`
+>   prose stating the mapping is contextual metadata, not proof** — the
+>   concrete embodiment of Phase 11 ("MITRE ATT&CK as metadata not proof").
+> - **Provenance is honest, not fabricated.** All 10 issues are attributed
+>   to a single seeded `KnowledgeSource` row with
+>   `source_organization="Helpdesktool Engineering (internal reference
+>   knowledge)"` — deliberately not attributed to any external standards
+>   body, since this migration performs no real external citation/retrieval;
+>   claiming otherwise would violate Phase 12's own provenance principle.
+>
+> **No new tests were added** — this milestone is pure reference data
+> riding entirely on Milestone 13's existing validation code path
+> (`IssueDefinition.__post_init__`, `MitreMapping.__post_init__`,
+> `validate_remediation_skill_references`, `compute_issue_definition_hash`),
+> which is already covered by `tests/test_knowledge.py`/
+> `tests/test_knowledge_api.py`. Verified instead by actually running the
+> migration: a fresh Postgres 17 container, `alembic upgrade head`
+> (succeeded, `alembic_version` lands on `0013_reference_knowledge`), direct
+> SQL confirming all 10 `issue_definitions` rows and the expected step count
+> per workflow (5 steps for the 3 issues with a `remediate` step, 4 for the
+> other 7), and a live `uvicorn` process against that database proving `GET
+> /v1/knowledge/issues` lists all 10 with `validated=true`/a non-empty
+> `content_hash`, and `GET /v1/knowledge/issues/{id}` on
+> `linux_systemd_service_failure` returns 200 with its content-hash
+> integrity check passing and its `remediate` step correctly showing
+> `remediation_skill_id="service.restart"`. `ruff`/`ruff format --check`/
+> `mypy --strict` clean; full `pytest` suite re-run with only the 4 known
+> pre-existing Windows-only failures, no regressions.
+>
+> Still not done from Phase 13: no new *executor* skills were added (still
+> only `service.restart`/`diagnostics.collect`) — building real remediation
+> capability for disk space, DNS, unauthorized software etc. is separately-
+> scoped future work each requiring its own deterministic, allowlisted
+> agent-side executor, not a knowledge-schema change.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
