@@ -662,3 +662,53 @@ class OrganizationalBaselineRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ChannelWorkspaceLink(Base):
+    """Maps one external chat provider's workspace (a Slack ``team_id``,
+    a Teams tenant id, ...) to exactly one Helpdesktool tenant (Phase 18).
+    ``signing_secret_ref`` follows the same environment-reference-only
+    pattern as ``WebhookSubscription.secret_ref``/``ApplicationConnectorConfig.
+    credential_ref`` -- see ``helpdesktool/channels/slack.py``'s
+    ``resolve_slack_signing_secret``. The ``(channel, workspace_id)`` pair
+    is globally unique (not per-tenant) so the same external workspace can
+    never be claimed by two different tenants.
+    """
+
+    __tablename__ = "channel_workspace_links"
+    __table_args__ = (UniqueConstraint("channel", "workspace_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(30))
+    workspace_id: Mapped[str] = mapped_column(String(200))
+    signing_secret_ref: Mapped[str] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ChannelIdentityLink(Base):
+    """Maps one external chat provider's already-authenticated user id
+    (never a name/email typed in a message -- see
+    ``helpdesktool/identity_resolution.py``'s trust-model docstring, the
+    same principle applied to a channel-native id instead of an email) to
+    a Helpdesktool ``User``, within one tenant.
+    """
+
+    __tablename__ = "channel_identity_links"
+    __table_args__ = (UniqueConstraint("tenant_id", "channel", "provider_user_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(30))
+    provider_user_id: Mapped[str] = mapped_column(String(200))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
