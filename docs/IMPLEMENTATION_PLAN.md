@@ -2569,6 +2569,51 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > `mypy --strict` clean; full `pytest` suite re-run with only the 4 known
 > pre-existing Windows-only failures, no regressions.
 
+> **Milestone 20 — Phase 14 action-preview surface (DONE, 2026-08-20).**
+> Diagnosis (`ai/provider.py`) was already unconditionally simulation-
+> only; this closes the matching gap on the remediation side. Previously
+> an operator could only infer what a `pending_approval` `Action` would
+> actually do from its raw stored manifest fields — no single, explicit
+> "here's exactly what would happen" answer existed.
+>
+> - `helpdesktool/action_preview.py` (new): `build_action_preview`
+>   templates a structured `ActionPreview` entirely from real, stored
+>   `SkillManifest` fields — what would execute (skill id/version/command
+>   type/parameters/timeout), the verification plan (`success_condition`
+>   or an honest fallback statement when none is registered), and the
+>   rollback plan (three distinct templated cases: reversible with a
+>   rollback label, reversible with none, or not reversible at all). Never
+>   free-form/AI-generated text, matching `confidence.py`/
+>   `security_classification.py`'s deterministic-explanation precedent.
+> - `GET /v1/actions/{id}/preview` in `api.py`: loads the action's
+>   *current* active skill manifest (via the existing integrity-checked
+>   `get_active_manifest`, not a snapshot from when the action was
+>   originally requested — if the manifest has since been re-registered
+>   at a new version, the preview reflects that), re-runs `PolicyEngine.
+>   evaluate` and `automation_level_for` live rather than trusting the
+>   action's historical `risk` column, and returns policy-allowed/
+>   approval-required/automation-level alongside the templated plan text.
+>   Works regardless of the action's current status.
+> - No new migration, no new table, no new `rls_bypass` use — pure
+>   read-only computation over `Action`/`SkillManifestRow`, both existing
+>   tables, scoped via the same `tenant_row` pattern `GET /v1/actions/{id}`
+>   already uses; a full real-Postgres RLS re-verification pass was judged
+>   disproportionate this time (no novel tenant-context code path, unlike
+>   Milestone 17's webhook endpoint) — the SQLite-tier tenant-isolation
+>   test below covers the actual risk surface.
+>
+> **Tests:** `tests/test_action_preview.py` (4 cases — a real
+> `service.restart` preview showing the correct rollback label and
+> approval requirement, a read-only `diagnostics.collect` preview needing
+> no approval, 404 on a nonexistent action, and 404 across a tenant
+> boundary). `ruff`/`ruff format --check`/`mypy --strict` clean; full
+> `pytest` suite re-run with only the 4 known pre-existing Windows-only
+> failures, no regressions.
+>
+> Not done: no frontend panel renders this yet (API-only) — same gap the
+> diagnosis feature had before Milestone 9 added its own review panel;
+> tracked as real, separate future work.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
