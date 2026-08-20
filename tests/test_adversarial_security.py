@@ -394,7 +394,7 @@ def test_wrong_claim_token_is_rejected(client):
         f"/v1/devices/{device['device_id']}/jobs/{action_id}/result",
         headers={
             **agent_headers,
-            "Idempotency-Key": "result-forged-1",
+            "Idempotency-Key": "result-forged-1",  # gitleaks:allow -- test fixture, not a secret
             "X-Claim-Token": "a-completely-made-up-token",
         },
         json={"success": True, "verified": True, "output": {}},

@@ -60,7 +60,7 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
         f"/v1/devices/{device['device_id']}/inventory",
         headers={
             "Authorization": f"Bearer {device['agent_token']}",
-            "Idempotency-Key": "inventory-low-disk-1",
+            "Idempotency-Key": "inventory-low-disk-1",  # gitleaks:allow -- test fixture, not a secret
         },
         json={
             "collected_at": "2026-08-18T12:00:00Z",
@@ -81,7 +81,7 @@ def test_tenant_device_telemetry_ticket_and_approval_workflow(client, monkeypatc
         f"/v1/devices/{device['device_id']}/inventory",
         headers={
             "Authorization": f"Bearer {device['agent_token']}",
-            "Idempotency-Key": "inventory-low-disk-2",
+            "Idempotency-Key": "inventory-low-disk-2",  # gitleaks:allow -- test fixture, not a secret
         },
         json={
             "collected_at": "2026-08-18T12:05:00Z",
