@@ -31,7 +31,19 @@ class FakeServiceManager:
         return None
 
 
-def build_agent(tmp_path: Path, *, service_manager=None) -> WindowsAgent:
+class FakeDnsResolver:
+    def __init__(self, succeeds: bool = True) -> None:
+        self.succeeds = succeeds
+        self.calls = 0
+
+    def flush(self) -> bool:
+        self.calls += 1
+        return self.succeeds
+
+
+def build_agent(
+    tmp_path: Path, *, service_manager=None, dns_resolver=None
+) -> WindowsAgent:
     config = AgentConfig(
         "http://localhost",
         "agent-1",
@@ -47,6 +59,7 @@ def build_agent(tmp_path: Path, *, service_manager=None) -> WindowsAgent:
         config,
         tmp_path / "agent.json",
         service_manager=service_manager or FakeServiceManager(),
+        dns_resolver=dns_resolver or FakeDnsResolver(),
     )
 
 
@@ -115,7 +128,10 @@ def test_agent_with_no_allowed_services_disables_remediation(tmp_path):
         signing_key_version=1,
     )
     agent = WindowsAgent(
-        config, tmp_path / "agent.json", service_manager=FakeServiceManager()
+        config,
+        tmp_path / "agent.json",
+        service_manager=FakeServiceManager(),
+        dns_resolver=FakeDnsResolver(),
     )
     assert agent.executor is None
     envelope = build_signed_job_envelope(
@@ -123,7 +139,7 @@ def test_agent_with_no_allowed_services_disables_remediation(tmp_path):
     )
     result = agent.execute_job(envelope, job_id=None)
     assert result["success"] is False
-    assert "disabled" in result["error"]
+    assert "no executor available" in result["error"]
 
 
 def test_recovery_after_crash_during_execution_verifies_without_reexecuting(tmp_path):
@@ -242,6 +258,39 @@ def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
     reloaded = AgentConfig.load(config_path)
     assert reloaded.tenant_id == "tenant-42"
     assert reloaded.device_id == "device-42"
+
+
+def test_dns_flush_cache_job_dispatches_to_dns_executor_and_executes(tmp_path):
+    agent = build_agent(tmp_path, dns_resolver=FakeDnsResolver(succeeds=True))
+    envelope = build_signed_job_envelope(
+        device_id="device-1",
+        tenant_id="tenant-1",
+        skill_id="dns.flush_cache",
+        parameters={},
+    )
+    result = agent.execute_job(envelope, job_id=None)
+    assert result["success"] is True
+    assert result["verified"] is True
+
+
+def test_dns_flush_cache_failure_does_not_touch_service_restart_executor(tmp_path):
+    class _ExplodingServiceManager(FakeServiceManager):
+        def restart(self, service: str, timeout_seconds: float) -> None:
+            raise AssertionError("service.restart executor should not run for this job")
+
+    agent = build_agent(
+        tmp_path,
+        service_manager=_ExplodingServiceManager(),
+        dns_resolver=FakeDnsResolver(succeeds=True),
+    )
+    envelope = build_signed_job_envelope(
+        device_id="device-1",
+        tenant_id="tenant-1",
+        skill_id="dns.flush_cache",
+        parameters={},
+    )
+    result = agent.execute_job(envelope, job_id=None)
+    assert result["success"] is True
 
 
 def test_enroll_with_token_is_a_noop_once_already_enrolled(tmp_path):

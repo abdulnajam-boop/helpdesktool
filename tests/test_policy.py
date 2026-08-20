@@ -124,6 +124,27 @@ def test_approval_required_skill_is_l3():
     )
 
 
+def test_dns_flush_cache_manifest_shape_is_automation_level_l1():
+    """Matches the real dns.flush_cache manifest registered by migration
+    0016 exactly: low risk, no rollback story (a cache flush has nothing
+    to restore), no approval flags -- classifies as L1 (verified but no
+    automatic rollback attempt), matching what
+    linux_agent/windows_agent's real DnsFlushCacheExecutor actually does.
+    """
+    skill = SkillDefinition(
+        "dns.flush_cache",
+        RiskLevel.LOW,
+        frozenset({"linux", "windows"}),
+        rollback_skill_id=None,
+        reversible=False,
+    )
+    request = ActionRequest("tenant", "device", skill.skill_id, "user")
+    decision = PolicyEngine([skill]).evaluate(request, "linux")
+    assert decision.allowed is True
+    assert decision.approval_required is False
+    assert decision.automation_level is AutomationLevel.L1_SAFE_AUTOMATIC
+
+
 def test_admin_approval_flag_forces_l4_even_over_l3():
     skill = SkillDefinition(
         "config.change",

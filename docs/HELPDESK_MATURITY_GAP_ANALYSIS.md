@@ -56,7 +56,7 @@ Priority tiers, per the governing mandate:
 | Gap | Status |
 |---|---|
 | Automation-level (L0-L5) enforcement beyond classification | **Mostly re-scoped after closer inspection (Milestone 23), one real inconsistency found and fixed.** `orchestrator.py`'s `_run` already unconditionally verifies every execution and already gates the rollback attempt on the skill's own `rollback_skill_id` — which, for L1 skills, is `None` by construction (see `automation_level_for`), so L1 already never gets an automatic rollback attempt; always verifying (even for L1) is strictly safer, not a gap to "fix" by skipping it. The one real bug: `_run`'s rollback gate checked only `rollback_skill_id`, not `reversible` — so a manifest inconsistently declaring `reversible=False` while still carrying a `rollback_skill_id` label would have gotten an automatic rollback attempt anyway, disagreeing with the `automation_level` already recorded on the same `policy.evaluated` audit event. Fixed to require both, matching `automation_level_for`'s L2 condition exactly; proven by a new test (`test_failed_verification_does_not_roll_back_a_skill_marked_not_reversible`). |
-| Reference skills content (Phase 13) | **Knowledge content DONE, executor code NOT** — all 10 issues the mandate proposes (Windows/Linux disk space, Windows/Linux service failure, Windows Update, DNS resolution, SSH auth, high CPU, unauthorized software, security-agent health) exist as real `IssueDefinition`/`DiagnosticWorkflow` records (Milestone 14). Exactly one mutating skill still exists (`service.restart`), so only 3 of the 10 workflows have a real `remediate` step — the rest correctly terminate in `escalate`, per `validate_remediation_skill_references`'s core invariant (knowledge may reference an existing skill, never invent one). Building real agent-side executors for disk-space/DNS/etc. is separate, real future work — see `skills.py`'s module docstring for why a registry entry alone was never going to be sufficient. |
+| Reference skills content (Phase 13) | **Knowledge content DONE; a second executor now real (Milestone 24).** All 10 issues the mandate proposes (Windows/Linux disk space, Windows/Linux service failure, Windows Update, DNS resolution, SSH auth, high CPU, unauthorized software, security-agent health) exist as real `IssueDefinition`/`DiagnosticWorkflow` records (Milestone 14). Two mutating skills now exist with real, deterministic, allowlisted executors on *both* agents: `service.restart` (since Milestone 4/5) and `dns.flush_cache` (Milestone 24 — `linux_agent`'s `resolvectl flush-caches`, `windows_agent`'s Win32 `DnsFlushResolverCache` via `ctypes`, no shell in either). Migration 0016 registers the skill; migration 0017 rewires the `dns_resolution_failure` workflow's final step from `escalate` to a real `remediate` step referencing it, without weakening the workflow's own DNS-misconfiguration judgment (it still escalates whenever configured servers deviate from baseline, or resolution still fails after the flush). 4 of the 10 workflows now have a real `remediate` step; the rest correctly terminate in `escalate`, per `validate_remediation_skill_references`'s core invariant. Verified against a real disposable Postgres container, not just SQLite: `alembic upgrade head`/`downgrade -1`/`upgrade head` round-tripped cleanly and produced exactly the intended skill row and 5-step workflow; `Win32DnsResolver().flush()` was also called live on a real Windows host in this pass and returned success. Building executors for the remaining 6 issues (disk cleanup, Windows Update, SSH auth remediation, unauthorized-software removal, high-CPU mitigation, security-agent repair) is separate, real future work — each needs its own safety analysis, not a batch add. |
 | Simulation/dry-run *execution preview* mode (Phase 14, beyond diagnosis) | **DONE** — `helpdesktool/action_preview.py` + `GET /v1/actions/{id}/preview`. Computed fresh from the current active skill manifest every call (never a stale cache); returns what would execute, the verification plan, the rollback plan, policy allowed/approval-required, and the automation level — all templated from real stored manifest fields, never free-form text. No frontend panel for it yet (API-only, same gap diagnosis had before its own frontend panel). |
 
 ## P4 — Knowledge expansion
@@ -124,6 +124,32 @@ itself from going stale relative to it:
 - (P3) The action-preview/dry-run execution surface (Milestone 20),
   closing the diagnosis-only half of Phase 14's simulation-mode
   requirement.
+
+## What changed in Milestones 22-24
+
+- (docs) Refreshed this document against Milestones 13-21 (Milestone 22);
+  no code changes.
+- (P3) Fixed a real orchestrator/policy consistency gap: the rollback gate
+  now requires `reversible` in addition to `rollback_skill_id`, matching
+  `automation_level_for`'s L2 condition exactly (Milestone 23).
+- (P3/P2) **First new genuinely executable reference skill since
+  `service.restart`: `dns.flush_cache` (Milestone 24)**, directly
+  answering the mandate's "implement and safely test the real
+  Windows/Linux executors for the existing reference skills — do not
+  merely add more manifests" instruction. Real, deterministic,
+  no-shell executors on both agents (`linux_agent`'s `resolvectl
+  flush-caches`, `windows_agent`'s Win32 `DnsFlushResolverCache` via
+  `ctypes`), dispatched by a new `_executor_for` lookup on each agent
+  rather than a single hardcoded executor. Registered via migration 0016
+  (L1 automation level: low risk, no rollback story, honestly declared).
+  Migration 0017 wires it into the existing `dns_resolution_failure`
+  knowledge workflow as a real `remediate` step, without loosening the
+  workflow's own judgment about actual DNS misconfiguration (still
+  escalates in that case). Verified against a real disposable Postgres
+  container (`alembic upgrade head`/`downgrade -1`/`upgrade head`
+  round-tripped cleanly) and, unusually for this codebase's Windows-only
+  pieces, against a real Windows host directly (`Win32DnsResolver().flush()`
+  called live, returned success) — not merely reasoned about.
 
 Continuing into the next highest-priority item per the mandate's explicit
 instruction not to stop between phases.

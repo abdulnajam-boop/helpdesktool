@@ -159,3 +159,54 @@ class ServiceRestartExecutor:
             "rollback_attempted": False,
             "rollback_succeeded": None,
         }
+
+
+class DnsFlushResolver(Protocol):
+    def flush(self) -> bool: ...
+
+
+class DnsFlushCacheExecutor:
+    """Deterministic ``dns.flush_cache`` remediation for the
+    ``dns_resolution_failure`` reference issue (``helpdesktool/knowledge.py``).
+
+    Mirrors ``linux_agent.executor.DnsFlushCacheExecutor``'s contract: no
+    parameters, no rollback story (a cache flush has nothing meaningful to
+    restore -- ``reversible=False``/``rollback_skill_id=None`` on the
+    registered manifest, migration ``0016``). ``DnsFlushResolver`` is a
+    Protocol purely so this module (and its tests) stay importable and
+    exercisable without the real Win32 API, exactly like ``ServiceManager``
+    above -- only constructing ``win32_dns_resolver.Win32DnsResolver``
+    requires Windows.
+    """
+
+    def __init__(self, resolver: DnsFlushResolver) -> None:
+        self.resolver = resolver
+
+    def execute(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        if parameters:
+            raise ValueError("dns.flush_cache accepts no parameters")
+        try:
+            flushed = self.resolver.flush()
+        except ServiceControlError as exc:
+            return self._failure(f"DnsFlushResolverCache failed: {exc}")
+        if not flushed:
+            return self._failure("DnsFlushResolverCache reported failure")
+        return {
+            "success": True,
+            "verified": True,
+            "output": {"flushed": True},
+            "error": None,
+            "rollback_attempted": False,
+            "rollback_succeeded": None,
+        }
+
+    @staticmethod
+    def _failure(error: str) -> dict[str, Any]:
+        return {
+            "success": False,
+            "verified": False,
+            "output": {},
+            "error": error,
+            "rollback_attempted": False,
+            "rollback_succeeded": None,
+        }

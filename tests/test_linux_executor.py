@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from linux_agent.executor import ServiceRestartExecutor
+from linux_agent.executor import DnsFlushCacheExecutor, ServiceRestartExecutor
 
 
 def completed(command, returncode=0, output=""):
@@ -97,3 +97,41 @@ def test_timeout_triggers_rollback():
     ).execute({"service": "demo.service"})
     assert result["error"] == "restart timed out"
     assert result["rollback_succeeded"] is True
+
+
+def test_dns_flush_cache_succeeds_and_verifies_resolver_health():
+    runner = SequenceRunner([completed([]), completed([], output=ACTIVE)])
+    result = DnsFlushCacheExecutor(runner=runner).execute({})
+    assert result["success"] is True
+    assert result["verified"] is True
+    assert result["rollback_attempted"] is False
+    assert runner.commands[0] == ["resolvectl", "flush-caches"]
+
+
+def test_dns_flush_cache_rejects_parameters_without_running_commands():
+    runner = SequenceRunner([])
+    with pytest.raises(ValueError):
+        DnsFlushCacheExecutor(runner=runner).execute({"unexpected": "value"})
+    assert runner.commands == []
+
+
+def test_dns_flush_cache_reports_failure_on_nonzero_exit():
+    runner = SequenceRunner([completed([], 1)])
+    result = DnsFlushCacheExecutor(runner=runner).execute({})
+    assert result["success"] is False
+    assert result["error"] == "flush-caches returned a non-zero exit code"
+    assert result["rollback_attempted"] is False
+
+
+def test_dns_flush_cache_reports_failure_when_resolver_unhealthy_after_flush():
+    runner = SequenceRunner([completed([]), completed([], output=FAILED)])
+    result = DnsFlushCacheExecutor(runner=runner).execute({})
+    assert result["success"] is False
+    assert result["error"] == "resolver service unhealthy after cache flush"
+
+
+def test_dns_flush_cache_command_failure_is_reported_not_raised():
+    runner = SequenceRunner([subprocess.TimeoutExpired(["resolvectl"], 1)])
+    result = DnsFlushCacheExecutor(runner=runner, timeout_seconds=1).execute({})
+    assert result["success"] is False
+    assert result["error"] == "flush-caches command failed to run"

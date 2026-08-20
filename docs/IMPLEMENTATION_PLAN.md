@@ -2703,6 +2703,91 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > verification for L1" as if it were still missing (it would be a safety
 > regression, not an improvement, if it were built).
 
+> **Milestone 24 — real `dns.flush_cache` executors on both agents
+> (DONE, 2026-08-20).** Directly answers the mandate's explicit priority:
+> "implement and safely test the real Windows/Linux executors for the
+> existing reference skills — do not merely add more manifests." Before
+> this pass, `service.restart` was the only mutating skill either agent
+> could actually execute, even though Milestone 14 had already registered
+> ten knowledge workflows describing remediations no executor backed.
+>
+> **New capability, both agents:**
+> - `linux_agent/executor.py`'s `DnsFlushCacheExecutor` runs
+>   `resolvectl flush-caches` via a fixed argument vector (no shell), then
+>   verifies `systemd-resolved` is still healthy afterward rather than
+>   trusting the command's exit code alone.
+> - `windows_agent/executor.py`'s `DnsFlushCacheExecutor` (same shape,
+>   `DnsFlushResolver` Protocol) is backed by a new
+>   `windows_agent/win32_dns_resolver.py`'s `Win32DnsResolver`, which calls
+>   `dnsapi.dll`'s `DnsFlushResolverCache` directly via stdlib `ctypes` —
+>   no pywin32, no `ipconfig` subprocess, no PowerShell, no process spawned
+>   at all. Lazily imported exactly like `win32_service_manager.py`, so the
+>   module (and CI on Linux) stays importable without a Windows-only
+>   dependency.
+> - Both agents' `LinuxAgent`/`WindowsAgent.execute_job` were refactored
+>   from a single hardcoded `self.executor` call to a small `_executor_for
+>   (skill_id)` dispatch (backed by a `_JobExecutor` Protocol so mypy
+>   --strict stays clean without an `Any` leak) so a second mutating skill
+>   didn't require special-casing — `dns.flush_cache` is always available
+>   (no allowlist: it targets no caller-chosen resource, unlike
+>   `service.restart`).
+> - `reversible=False`/`rollback_skill_id=None`, honestly declared rather
+>   than fabricated: a cache flush has no prior state worth restoring, so
+>   `automation_level_for` classifies it L1 (verified, no automatic
+>   rollback attempt) — matching exactly what the real executors do.
+>
+> **Control plane:** migration `0016_dns_flush_cache_skill` registers the
+> manifest (mirroring migration 0008's pattern). Migration
+> `0017_dns_flush_cache_remediation` rewires the existing
+> `dns_resolution_failure` knowledge workflow (migration 0013) from a
+> 4-step, escalate-only sequence to a 5-step one: collect_evidence and
+> check_precondition are untouched; a new `remediate` step (referencing
+> `dns.flush_cache`) and `verify` step are inserted; `escalate` still fires
+> whenever configured DNS servers deviate from baseline or resolution still
+> fails after the flush — the workflow's judgment about actual
+> misconfiguration is unchanged, only the "try a safe flush first" case is
+> new. Confirmed `issue_definitions.content_hash`
+> (`compute_issue_definition_hash`) doesn't cover step content by design
+> (its own docstring), so no hash recomputation was needed or risked.
+>
+> **Verified for real, not just reasoned about:** spun up a disposable
+> Postgres 16 container and ran the actual migration chain —
+> `alembic upgrade head` reached `0017_dns_flush_cache_remediation` cleanly;
+> `downgrade -1` twice and `upgrade head` again reproduced byte-for-byte
+> the same skill row and 5-step workflow; `helpdesk-seed` and the full
+> `pytest` suite (including the Postgres/RLS tier via
+> `HELPDESK_TEST_DATABASE_URL`) ran clean against the migrated database.
+> Separately, since this development pass happened to run on a real
+> Windows machine, `Win32DnsResolver().flush()` was called live —
+> returned success — and so was
+> `DnsFlushCacheExecutor(Win32DnsResolver()).execute({})`, returning a
+> genuine `success: True` result. This is the first time this codebase's
+> Windows-only agent code has been exercised against real Windows rather
+> than only reasoned about or covered via a Protocol fake.
+>
+> **Tests:** new unit tests for both executors (success, parameter
+> rejection, command/API failure, post-flush health-check failure) in
+> `tests/test_linux_executor.py`/`tests/test_windows_executor.py`; new
+> agent-level dispatch tests in `tests/test_linux_agent.py`/
+> `tests/test_windows_agent.py` proving a `dns.flush_cache` job routes to
+> the DNS executor and never touches the service-restart executor; a new
+> `helpdesktool.knowledge` test proving the updated 5-step DNS workflow
+> validates cleanly against the real registered skill set
+> (`tests/test_knowledge.py`); a new `helpdesktool.policy` test proving the
+> real manifest shape classifies as L1 (`tests/test_policy.py`). `ruff`/
+> `ruff format --check`/`mypy --strict`/`python -m compileall` clean; full
+> `pytest` suite re-run with only the 4 known pre-existing Windows-only
+> failures, no regressions — confirmed both via SQLite-only and via the
+> real-Postgres tier.
+>
+> Not done, deliberately scoped narrow per the mandate's "make the
+> existing reference skills excellent first, don't generate hundreds of
+> skills" instruction: the other 6 reference workflows (disk cleanup,
+> Windows Update, SSH auth remediation, unauthorized-software removal,
+> high-CPU mitigation, security-agent repair) still correctly terminate in
+> `escalate` — each would need its own safety analysis before a real
+> executor is worth building, not a batch conversion.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

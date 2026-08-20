@@ -174,3 +174,82 @@ class ServiceRestartExecutor:
             "rollback_attempted": False,
             "rollback_succeeded": None,
         }
+
+
+class DnsFlushCacheExecutor:
+    """Deterministic ``dns.flush_cache`` remediation for the
+    ``dns_resolution_failure`` reference issue (``helpdesktool/knowledge.py``).
+
+    Flushes the systemd-resolved DNS cache via a fixed argument vector (no
+    shell, no parameter templating -- same invariant as
+    ``ServiceRestartExecutor``). Unlike a service restart, a cache flush has
+    no prior state worth restoring: it is safe, idempotent, and has no
+    failure mode a rollback could meaningfully undo, so this executor never
+    attempts one (``reversible=False``/``rollback_skill_id=None`` on the
+    registered manifest -- see migration ``0016``). Verification does not
+    merely trust the flush command's exit code: it also confirms the
+    resolver service itself is still healthy afterward, so a flush that
+    somehow disrupts ``systemd-resolved`` is reported as a failure rather
+    than a false success.
+    """
+
+    def __init__(
+        self, runner: Runner = run_command, timeout_seconds: float = 10.0
+    ) -> None:
+        self.runner = runner
+        self.timeout = timeout_seconds
+
+    def _resolver_state(self) -> ServiceState:
+        result = self.runner(
+            [
+                "systemctl",
+                "show",
+                "systemd-resolved",
+                "--property=LoadState,ActiveState,SubState",
+                "--no-pager",
+            ],
+            timeout=min(self.timeout, 5.0),
+        )
+        values = dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+        return ServiceState(
+            values.get("LoadState", "unknown"),
+            values.get("ActiveState", "unknown"),
+            values.get("SubState", "unknown"),
+        )
+
+    def execute(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        if parameters:
+            raise ValueError("dns.flush_cache accepts no parameters")
+        try:
+            flushed = self.runner(["resolvectl", "flush-caches"], timeout=self.timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return self._failure("flush-caches command failed to run")
+        if flushed.returncode != 0:
+            return self._failure("flush-caches returned a non-zero exit code")
+        try:
+            after = self._resolver_state()
+        except (OSError, subprocess.TimeoutExpired):
+            return self._failure("post-flush verification failed")
+        if after.active == "active" and after.sub == "running":
+            return {
+                "success": True,
+                "verified": True,
+                "output": {"resolver": asdict(after)},
+                "error": None,
+                "rollback_attempted": False,
+                "rollback_succeeded": None,
+            }
+        return self._failure("resolver service unhealthy after cache flush")
+
+    @staticmethod
+    def _failure(error: str) -> dict[str, Any]:
+        return {
+            "success": False,
+            "verified": False,
+            "output": {},
+            "error": error,
+            "rollback_attempted": False,
+            "rollback_succeeded": None,
+        }
