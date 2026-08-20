@@ -100,6 +100,19 @@ services:
     cap_drop: ["ALL"]
     restart: unless-stopped
 
+  connector-request-reaper:
+    build: .
+    env_file: .env
+    command: ["helpdesk-connector-request-reaper"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
   retention-worker:
     build: .
     env_file: .env

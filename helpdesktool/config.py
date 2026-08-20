@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     oidc_jwks_url: str = ""
     lease_reaper_max_attempts: int = 3
     lease_reaper_poll_seconds: float = 15.0
+    # Phase 8/P2: a pending_approval ConnectorRequest has no agent claim/
+    # lease (unlike Action) -- it just waits on a human decision. "Stuck"
+    # here means no approver acted within this window, not a crashed
+    # process; see helpdesktool/connector_request_reaper.py.
+    connector_request_stale_after_hours: float = 24.0
+    connector_request_reaper_poll_seconds: float = 300.0
     # Retention windows for the three tables with no cryptographic-chain
     # constraint on deletion (contrast audit_events, which retention_worker
     # deliberately never touches -- see its module docstring). Defaults are

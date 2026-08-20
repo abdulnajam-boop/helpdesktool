@@ -2364,6 +2364,46 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > remediation. That wiring is real, separately-scoped future work, same as
 > Milestone 13's knowledge schema.
 
+> **Milestone 16 — Phase 8 connector-request idempotency/loop prevention
+> (DONE, 2026-08-20).** Closes the P2 gap `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`
+> flagged: `ConnectorRequest` had no equivalent of `Action`'s
+> `lease_reaper.py` — a `pending_approval` request nobody ever decided on
+> stayed that way forever, invisible except to whoever remembered to check
+> the approvals queue.
+>
+> - `helpdesktool/connector_request_reaper.py` (new): `ConnectorRequestReaper.
+>   process_batch` finds `ConnectorRequest` rows `status == "pending_approval"`
+>   older than `Settings.connector_request_stale_after_hours` (default 24h)
+>   and marks them `expired` with a `connector_request.escalation_required`
+>   audit event. Deliberately **not** a requeue like `lease_reaper` — a
+>   `ConnectorRequest` has no agent claim/lease to lose in the first place
+>   (it just waits on a human decision), so there is nothing to "retry
+>   automatically"; a still-wanted request is resubmitted by a human,
+>   ideally decided before it goes stale again.
+> - `helpdesk-connector-request-reaper` entry point (`pyproject.toml`) and
+>   Compose service (`compose.yaml`), mirroring `lease-reaper`'s exact
+>   shape (`read_only`, dropped capabilities, `depends_on: seed`).
+> - New settings: `connector_request_stale_after_hours` (24.0),
+>   `connector_request_reaper_poll_seconds` (300.0).
+> - This is the **fifth** legitimate `app.rls_bypass` call site (a stale
+>   request can belong to any tenant, same reasoning as `lease_reaper`/
+>   `webhook_worker`/`retention_worker`) — `helpdesktool/rls.py`'s module
+>   docstring and every place in `CLAUDE.md` that said "four" were updated
+>   to "five" so that invariant stays accurate for the next reviewer.
+>
+> **Tests:** `tests/test_connector_request_reaper.py` (3 cases — stale
+> request expires with the audit event, a recent request is left alone,
+> a request already past `pending_approval` e.g. `approved` is ignored).
+> `ruff`/`ruff format --check`/`mypy --strict` clean; full `pytest` suite
+> re-run with only the 4 known pre-existing Windows-only failures (one
+> additional failure, `test_config.py::test_production_rejects_default_app_role_password`,
+> was observed once in a CI-matching container run but confirmed to be a
+> verification-harness artifact only — this session's own container had
+> `HELPDESK_APP_ROLE_PASSWORD` set as a real environment variable for the
+> `alembic upgrade head` step, which pydantic-settings then also picked up
+> for that test's `Settings()` construction; re-run with a clean
+> environment, all 8 `test_config.py` tests pass — not a real regression).
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
