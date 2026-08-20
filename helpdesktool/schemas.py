@@ -67,6 +67,30 @@ class SkillManifestCreate(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     rollback_skill_id: str | None = Field(default=None, max_length=200)
     parameters: dict[str, SkillParameterSpec] = Field(default_factory=dict)
+    # Phase 2 safety metadata -- see helpdesktool/skills.py's SkillManifest
+    # docstring for which of these are integrity-hash-covered. A
+    # "destructive" command_type is accepted here (it's still meaningful to
+    # register and audit one) but PolicyEngine refuses to ever let it
+    # execute autonomously, unconditionally, regardless of risk tier.
+    command_type: Literal[
+        "read_only",
+        "low_risk_change",
+        "privileged_change",
+        "security_containment",
+        "destructive",
+    ] = "low_risk_change"
+    requires_user_approval: bool = False
+    requires_admin_approval: bool = False
+    security_sensitive: bool = False
+    reversible: bool = True
+    required_privilege: str = Field(default="", max_length=100)
+    preconditions: dict[str, Any] = Field(default_factory=dict)
+    expected_output: str = Field(default="", max_length=2000)
+    success_condition: str = Field(default="", max_length=2000)
+    failure_condition: str = Field(default="", max_length=2000)
+    side_effects: str = Field(default="", max_length=2000)
+    requires_reboot: bool = False
+    allowed_execution_context: str = Field(default="", max_length=100)
 
 
 class ActionCreate(BaseModel):

@@ -2020,6 +2020,123 @@ configurable approval policy, and exportable/auditable compliance evidence.
 
 ---
 
+### Milestone 12 — Safety/knowledge foundations: destructive-action blocking, automation levels, security classification, deterministic confidence (DONE, 2026-08-20)
+
+> **Actual completion status: DONE for the scope below.** Full audit
+> performed first (`docs/CURRENT_ARCHITECTURE_AUDIT.md`, all 25 areas the
+> governing mandate specified) — the pre-existing platform was
+> substantially working, not rebuilt. This milestone is Phases 0-5 of
+> that mandate (the P0/P1 safety-critical slice); Phases 6+ (knowledge
+> schema, reference skills, omnichannel continuation, UI modernization,
+> production hardening, dependency audit) are tracked in
+> `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md` as prioritized, not-yet-started
+> work — not silently deferred.
+>
+> **What was actually built:**
+> - `helpdesktool/models.py`: three new shared enums —
+>   `CommandType` (READ_ONLY/LOW_RISK_CHANGE/PRIVILEGED_CHANGE/
+>   SECURITY_CONTAINMENT/DESTRUCTIVE, a safety dimension independent of
+>   `RiskLevel`), `AutomationLevel` (L0-L5, independent of both risk and
+>   security classification), `SecurityClassification` (NORMAL through
+>   CONFIRMED_COMPROMISE).
+> - `helpdesktool/policy.py`: `PolicyEngine.evaluate` now hard-refuses any
+>   skill whose `command_type` is `DESTRUCTIVE`, unconditionally, before
+>   risk/approval is even considered — a skill mismarked with a low risk
+>   tier can never destructively change an endpoint "by accident" through
+>   a risk-tier misconfiguration alone. New `automation_level_for`
+>   deterministically classifies L0-L5 from a skill's own declared
+>   properties only (never from incident/security context — "a suspicious
+>   event does not automatically mean L5" is enforced by construction,
+>   not by convention). Automation level is now recorded on every
+>   `policy.evaluated` audit event.
+> - `helpdesktool/security_classification.py` (new): `classify_security_state`
+>   requires signals spanning **at least two distinct evidence categories**
+>   before reaching `SUSPICIOUS`, and **at least three high-weight
+>   categories** for `LIKELY_COMPROMISED` — a single category, however
+>   many signals it contains, structurally cannot reach either.
+>   `CONFIRMED_COMPROMISE` is reachable only via an explicit
+>   `confirmed_by_authoritative_source` flag this module never sets
+>   itself, never from signal accumulation. Directly encodes every
+>   specific correction the mandate's Phase 15/`docs/KNOWLEDGE_BASE_AUDIT.md`
+>   calls out (high CPU alone, PowerShell alone, one failed login alone,
+>   a MITRE-tagged signal alone, cryptominer-style CPU+port correlation
+>   needing a third category) as executable tests, not just prose.
+> - `helpdesktool/confidence.py` (new): deterministic, evidence-based
+>   confidence scoring — `ConfidenceInput` (required/supporting/
+>   contradicting/missing signal counts, source/telemetry reliability,
+>   historical baseline matches) → `ConfidenceResult` (score, band,
+>   evidence_summary). Diminishing returns on signal counts; a single
+>   contradicting signal caps achievable confidence regardless of
+>   supporting-signal volume. Default bands match the mandate's spec
+>   exactly (LOW 0-0.39, MEDIUM 0.40-0.69, HIGH 0.70-0.89, VERY_HIGH
+>   0.90-1.00) and are tenant/policy-configurable via
+>   `ConfidenceThresholds`.
+> - **A real, pre-existing defect found and fixed:**
+>   `helpdesktool/ai/provider.py`'s `OpenAICompatibleProvider` prompt
+>   literally asked the model to invent its own `confidence` number —
+>   exactly the anti-pattern Phase 5 prohibits ("the LLM must NOT invent
+>   confidence numbers"). Fixed: the prompt no longer requests one, the
+>   parser discards whatever a model returns anyway regardless of prompt
+>   compliance, and `api.py`'s `diagnose_incident` now computes the real
+>   score deterministically from actual incident evidence (recurrence
+>   count, severity, device telemetry freshness via the existing
+>   `DEVICE_ONLINE_THRESHOLD`) before persisting or returning it. Proven
+>   with a hostile fake provider claiming 0.99 confidence for a single
+>   low-severity, non-recurring incident
+>   (`tests/test_diagnosis_confidence.py`) — the persisted/returned score
+>   is nowhere near that, proving the claimed value was discarded and
+>   replaced, not merely capped.
+> - `helpdesktool/skills.py`/`db_models.py`/`api.py`/`schemas.py`
+>   (extended, not duplicated — per the mandate's explicit instruction):
+>   the skill registry gained Phase 2's full safety-metadata surface.
+>   Five fields (`command_type`, `requires_user_approval`,
+>   `requires_admin_approval`, `security_sensitive`, `reversible`) are
+>   **integrity-hash-covered** (tampering with any of them directly in the
+>   database, bypassing `POST /v1/skills`, is caught exactly like
+>   tampering with `risk`/`supported_os` already is); eight more
+>   (`required_privilege`, `preconditions`, `expected_output`,
+>   `success_condition`, `failure_condition`, `side_effects`,
+>   `requires_reboot`, `allowed_execution_context`) are descriptive
+>   planning metadata, deliberately not hash-covered — see
+>   `SkillManifest`'s docstring for the exact reasoning behind that split.
+> - Migration `0011_skill_safety_metadata`: adds the thirteen new columns
+>   with defaults chosen to exactly match `compute_manifest_hash`'s new
+>   keyword defaults. **Subtle correctness point, verified for real, not
+>   just reasoned about:** migration `0008` seeds its two built-in skills
+>   by calling the *live* `compute_manifest_hash` (Python imports are live,
+>   not a frozen historical snapshot), which — once this migration exists
+>   in the codebase — already includes these five fields' defaults in the
+>   hash it computes, even though `0008` runs before `0011` actually adds
+>   the columns. A real `alembic upgrade head` from empty, followed by a
+>   real `GET /v1/skills` and a real `POST /v1/actions` against the
+>   freshly migrated database, both succeeded with no
+>   `SkillIntegrityError` — confirming the two migrations' hash
+>   computations land on the same values by the time the sequence
+>   completes.
+>
+> **Tests:** `tests/test_confidence.py` (13 cases), `tests/
+> test_security_classification.py` (15 cases), 9 new cases in `tests/
+> test_policy.py` (destructive-block + automation-level classification),
+> 2 new cases in `tests/test_ai_provider.py` (confidence-discard, updating
+> one pre-existing test whose assumption — that the provider's claimed
+> confidence should be trusted — was itself the exact anti-pattern this
+> milestone closes), and `tests/test_diagnosis_confidence.py` (1 case,
+> the hostile-provider end-to-end proof). 273 tests collected total (up
+> from 217), full suite green — `ruff`, `ruff format --check`, `mypy
+> --strict`, `pytest` — both locally (SQLite) and in a real `python:3.13`
+> Linux container against real Postgres 17, including the fresh-migration
+> verification above.
+>
+> **Documentation:** `docs/CURRENT_ARCHITECTURE_AUDIT.md` (new, all 25
+> mandated audit areas), `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md` (new,
+> P0-P5 prioritized backlog), `docs/KNOWLEDGE_BASE_AUDIT.md` (new — since
+> no knowledge content has been imported yet, this records the ten
+> specific technical corrections the mandate calls out as *binding
+> validation rules* the not-yet-built ingestion pipeline must enforce,
+> rather than auditing content that doesn't exist).
+
+---
+
 ## Open questions to resolve before autonomous execution starts
 
 1. **Target cloud/deployment substrate for Milestone 8** — Kubernetes/Helm vs. a
