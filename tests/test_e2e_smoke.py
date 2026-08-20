@@ -10,14 +10,18 @@ proof that the whole stack still functions together end to end:
 
   tenant -> user -> device enrollment (one-time token)
   -> telemetry (low disk) -> deterministic incident detection
-  -> incident correlated to a ticket ("diagnosis")
+  -> incident correlated to a ticket
+  -> advisory AI diagnosis (deterministic fallback, no provider configured)
   -> operator proposes a remediation action ("remediation plan")
   -> policy evaluation (risk-based approval requirement)
   -> independent admin approval
-  -> job dispatch -> agent claim -> agent execution -> verification
+  -> job dispatch -> agent claim -> signed job envelope verification
+  -> agent execution -> verification
   -> ticket resolution (telemetry recovers) / incident resolved
   -> audit trail (hash-chained, queryable by correlation id)
   -> dashboard visibility (counts reflect everything above)
+  -> operational report reflects the same activity
+  -> Prometheus metrics reflect the same activity
 
 This does not replace the more targeted test files (test_oidc.py,
 test_tenant_isolation_postgres.py, test_endpoint_trust.py,
@@ -116,6 +120,25 @@ def test_full_autonomous_helpdesk_lifecycle(postgres_client, oidc_test_keypair):
     ticket = http.get(f"/v1/tickets/{ticket_id}", headers=owner_headers).json()
     assert ticket["status"] == "open"
 
+    # --- advisory AI diagnosis (deterministic fallback: no provider is
+    # configured in tests, same as a real deployment that hasn't set
+    # Settings.ai_provider_* -- see helpdesktool/ai/provider.py) -----------
+    diagnosis = http.post(
+        f"/v1/incidents/{incident_id}/diagnose", headers=owner_headers
+    )
+    assert diagnosis.status_code == 201, diagnosis.text
+    # No AI provider is configured in this test environment (Settings.
+    # ai_provider_* are all empty), so get_ai_provider hands back the
+    # deterministic provider directly -- it never throws, so
+    # diagnose_with_fallback's fallback_used stays False (that flag means
+    # "a configured provider failed and we caught it", not "which provider
+    # ran" -- provider_name is the field that answers that).
+    assert diagnosis.json()["provider_name"] == "deterministic-fallback"
+    assert diagnosis.json()["summary"]
+    # Advisory only: nothing above created an Action. An operator still has
+    # to explicitly propose remediation, which is what happens next.
+    assert http.get("/v1/actions", headers=owner_headers).json() == []
+
     # --- remediation plan: operator proposes an approved skill ----------
     action = http.post(
         "/v1/actions",
@@ -159,6 +182,22 @@ def test_full_autonomous_helpdesk_lifecycle(postgres_client, oidc_test_keypair):
         json={},
     )
     assert claim.status_code == 200
+
+    # --- signed job envelope verification: exactly what a real agent does
+    # before it will let a job reach its executor (agent_common.signing,
+    # Milestone 3) -- proves the envelope claim_job actually returned is
+    # genuinely valid, not just shaped correctly.
+    from agent_common.signing import verify_envelope
+
+    verify_envelope(
+        claim.json(),
+        public_key_pem=enrolled.json()["signing_public_key_pem"],
+        expected_device_id=device_id,
+        expected_tenant_id=tenant_id,
+        supported_skill_versions={
+            "service.restart": frozenset({claim.json()["skill_version"]})
+        },
+    )  # raises EnvelopeError on any failure; a clean return is the assertion
 
     from linux_agent.executor import ServiceRestartExecutor
 
@@ -260,3 +299,23 @@ def test_full_autonomous_helpdesk_lifecycle(postgres_client, oidc_test_keypair):
     assert any(row["id"] == action_id for row in dashboard["recent_actions"])
     assert any(row["id"] == ticket_id for row in dashboard["recent_tickets"])
     assert any(row["id"] == incident_id for row in dashboard["recent_incidents"])
+
+    # --- operational report reflects the same activity -------------------
+    report = http.get("/v1/reports/summary", headers=owner_headers)
+    assert report.status_code == 200
+    report_body = report.json()
+    assert report_body["incidents"]["detected"] == 1
+    assert report_body["incidents"]["resolved"] == 1
+    assert report_body["tickets"]["resolved"] == 1
+    assert report_body["remediation"]["succeeded"] == 1
+    assert report_body["remediation"]["success_rate"] == 1.0
+    assert report_body["approvals"]["approved"] == 1
+    assert report_body["security"] == {"policy_denials": 0, "approval_denials": 0}
+
+    # --- Prometheus metrics reflect the same activity ---------------------
+    metrics = http.get("/metrics", headers=owner_headers)
+    assert metrics.status_code == 200
+    metrics_body = metrics.text
+    assert 'helpdesk_actions_total{status="succeeded"}' in metrics_body
+    assert 'helpdesk_incidents_total{status="resolved"}' in metrics_body
+    assert "helpdesk_http_requests_total" in metrics_body
