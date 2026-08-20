@@ -198,6 +198,38 @@ cd .. && docker compose config && docker compose build
 
 CI (`.github/workflows/ci.yml`) runs four independent jobs from the repository manifests: `backend` (the Python checks above), `frontend` (typecheck/test/build), `security` (`gitleaks` secret scanning, `pip-audit` for backend dependency CVEs, `npm audit --audit-level=high` for frontend dependency CVEs), and `docker` (builds the API and frontend Docker images, scans each with `trivy` for fixable CRITICAL/HIGH vulnerabilities, then actually runs each one -- not just `docker build` -- specifically to catch startup failures a build alone can't).
 
+## Backup and restore
+
+Standard `pg_dump`/`pg_restore` against the `db` service works unmodified — nothing
+here is Helpdesktool-specific, since the schema, RLS policies, and the restricted
+`helpdesk_app` role are all owned by the database itself, not by anything the API
+process holds in memory. Verified end to end (dump → drop the database → recreate
+it → restore → confirmed `pg_policies` and the `helpdesk_app` role survive intact →
+a real API process started against the restored database serves `/health/ready`
+successfully) as part of this project's own release validation, not just asserted:
+
+```bash
+# Backup (run against the db service/container)
+pg_dump -U helpdesk -d helpdesk -Fc -f backup.dump
+
+# Restore into a fresh database (the target database must already exist and
+# be empty -- pg_restore does not create it)
+createdb -U helpdesk helpdesk_restored
+pg_restore -U helpdesk -d helpdesk_restored backup.dump
+```
+
+`helpdesk_app` (the restricted runtime role) is cluster-level, not database-level,
+so restoring into the *same* PostgreSQL cluster the backup came from needs no extra
+step. Restoring into a *different* cluster (e.g. a new deployment) needs migration
+`0005` run first (`alembic upgrade head` against an empty database, which creates
+that role) — this is exactly what `docker compose`'s `migrate` service already does
+on every startup, so a fresh cluster with `docker compose up` followed by a
+`pg_restore` into its (now-schema-owning, empty) database works the same way.
+Audit events are append-only and hash-chained by design (see
+`helpdesktool/audit.py`/`retention_worker.py`'s module docstrings) — a restored
+backup's audit chain is exactly as verifiable as it was at backup time, nothing
+about backup/restore weakens that guarantee.
+
 ## Shutdown and reset
 
 Preserve development data:

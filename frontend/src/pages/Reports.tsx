@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Panel, Table, Title, when } from '../components'
 import { useApi } from '../hooks'
 
@@ -26,11 +26,18 @@ function formatRate(rate: number | null | undefined) {
 
 export function Reports() {
   const [days, setDays] = useState('7')
-  const end = new Date()
-  const start = new Date(end.getTime() - Number(days) * 86400000)
-  const state = useApi<any>(
-    `/v1/reports/summary?start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`,
-  )
+  // Computed once per `days` selection, not on every render: useApi's
+  // effect re-fires whenever this path string changes, so deriving `end`
+  // from `new Date()` directly in the render body (a fresh timestamp,
+  // and therefore a fresh path, on every single render) created an
+  // infinite fetch loop that a real browser test caught -- the page never
+  // stopped re-requesting long enough for any single response to render.
+  const path = useMemo(() => {
+    const end = new Date()
+    const start = new Date(end.getTime() - Number(days) * 86400000)
+    return `/v1/reports/summary?start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`
+  }, [days])
+  const state = useApi<any>(path)
   const report = state.data
   return (
     <>
