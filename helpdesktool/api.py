@@ -48,6 +48,11 @@ from .db_models import (
 )
 from .development_auth import issue_session
 from .events import EventType
+from .hardening import (
+    RateLimitMiddleware,
+    RequestSizeLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from .incidents import detect_inventory_incidents, incident_json
 from .integrations import validate_webhook_url
 from .job_signing import CURRENT_KEY_VERSION, public_key_pem, sign_envelope
@@ -82,10 +87,24 @@ from .skills import ParameterSpec, SkillManifest, validate_parameters
 
 configure_logging()
 
-app = FastAPI(title="Helpdesktool Control Plane", version="0.2.0")
+_settings = get_settings()
+# FastAPI's built-in Swagger/ReDoc UI and raw OpenAPI schema are
+# development-only, matching every other dev-only surface in this codebase
+# (dev login, insecure header auth) — publicly exposing the full endpoint/
+# field-name schema of a multi-tenant SaaS API by default isn't a
+# necessary tradeoff, and nothing in this app's own operation depends on
+# them being reachable outside development.
+_docs_enabled = _settings.environment == "development"
+app = FastAPI(
+    title="Helpdesktool Control Plane",
+    version="0.2.0",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().allowed_cors_origins,
+    allow_origins=_settings.allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
@@ -126,6 +145,18 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(
+    RequestSizeLimitMiddleware, max_bytes=_settings.request_max_body_bytes
+)
+app.add_middleware(
+    RateLimitMiddleware,
+    max_requests=_settings.rate_limit_max_requests,
+    window_seconds=_settings.rate_limit_window_seconds,
+    enabled=_settings.environment != "development",
+)
+app.add_middleware(
+    SecurityHeadersMiddleware, hsts=_settings.environment != "development"
+)
 
 
 def _manifest_from_row(row: SkillManifestRow) -> SkillManifest:
