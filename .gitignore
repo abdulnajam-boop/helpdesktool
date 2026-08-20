@@ -7,6 +7,8 @@ build/
 dist/
 .venv/
 .env
+.env.*
+!.env.example
 .coverage
 
 frontend/node_modules/
