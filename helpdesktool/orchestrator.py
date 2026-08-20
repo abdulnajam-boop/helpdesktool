@@ -156,7 +156,15 @@ class ActionOrchestrator:
                 "error": result.error,
             },
         )
-        if skill.rollback_skill_id is not None:
+        # Mirror policy.automation_level_for's L2 condition exactly
+        # (reversible AND a declared rollback_skill_id) rather than just
+        # rollback_skill_id alone -- a manifest that inconsistently
+        # declares reversible=False while still carrying a
+        # rollback_skill_id label must not have rollback silently
+        # attempted anyway; that would make the orchestrator's actual
+        # behavior disagree with the automation_level already recorded on
+        # this same policy.evaluated audit event.
+        if skill.reversible and skill.rollback_skill_id is not None:
             rollback = self._executor.rollback(skill, record.request, result)
             record.status = (
                 ActionStatus.ROLLED_BACK

@@ -2648,6 +2648,61 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > Still not done: release signing (Sigstore/cosign for container images,
 > signed release archives) — real, separate future work.
 
+> **Milestone 22 — refreshed `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`
+> (DONE, 2026-08-20).** Pure documentation: updated stale table rows
+> (knowledge schema, MITRE/CVE tables, provenance tracking, reference
+> skills content, action-preview, connector-request idempotency) to show
+> what Milestones 13-21 actually closed, and added a "Milestones 13-21"
+> summary section alongside the pre-existing Milestone 12 one (kept, not
+> overwritten, per the mandate's "preserve completed milestone history"
+> instruction). No code changes.
+
+> **Milestone 23 — Phase 3 automation-level/orchestrator consistency fix
+> (DONE, 2026-08-20).** Investigated the maturity analysis's own P3 item
+> "differentiate L1 from L2 in the orchestrator's control flow" — closer
+> inspection of `orchestrator.py`'s `_run` showed the premise was already
+> mostly wrong: it already unconditionally verifies every execution
+> (strictly safer than skipping verification for L1, not a gap) and
+> already gates the rollback attempt on `rollback_skill_id`, which is
+> `None` for every L1 skill by construction (`automation_level_for`'s own
+> logic) — so L1 already never gets an automatic rollback attempt in
+> practice.
+>
+> **One real, narrower inconsistency found instead:** `_run`'s rollback
+> gate checked only `skill.rollback_skill_id is not None`, never
+> `skill.reversible` — while `automation_level_for`'s L2 condition
+> requires *both* (`reversible and rollback_skill_id`). A manifest that
+> inconsistently declared `reversible=False` while still carrying a
+> `rollback_skill_id` label would have gotten an automatic rollback
+> attempt anyway from the orchestrator, silently disagreeing with the
+> `automation_level` already recorded on that same action's
+> `policy.evaluated` audit event. Fixed in `orchestrator.py`'s `_run` to
+> require both conditions, exactly matching `automation_level_for`'s L2
+> definition, so the orchestrator's actual behavior can never drift from
+> what the audit trail already claims.
+>
+> No new migration, no schema change — a one-condition fix plus one new
+> test, `test_failed_verification_does_not_roll_back_a_skill_marked_not_reversible`
+> (`tests/test_orchestrator.py`), proving a `reversible=False` +
+> `rollback_skill_id`-carrying skill correctly ends `FAILED` with no
+> `rollback.completed` audit event, rather than being silently rolled
+> back. Existing orchestrator/policy tests were unaffected (every
+> existing test fixture's skill defaults `reversible=True`, matching
+> `SkillDefinition`'s own dataclass default, so the tightened condition is
+> equivalent to the old one for all pre-existing test skills). `ruff`/
+> `ruff format --check`/`mypy --strict` clean; full `pytest` suite re-run
+> with only the 4 known pre-existing Windows-only failures, no
+> regressions.
+>
+> Documented honestly in `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`: this
+> gap was **mostly re-scoped, not fully "closed" as originally framed** —
+> the original framing ("differentiate L1 fire-and-forget from L2
+> verify+rollback") turned out to already be substantially true by
+> construction once the code was actually read, which is itself worth
+> recording so a future pass doesn't re-propose implementing "skip
+> verification for L1" as if it were still missing (it would be a safety
+> regression, not an improvement, if it were built).
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
