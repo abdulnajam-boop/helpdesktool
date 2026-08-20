@@ -65,9 +65,7 @@ class LinuxAgent:
         )
         self.config.device_id = result["device_id"]
         self.config.agent_token = result["agent_token"]
-        if result.get("signing_public_key_pem"):
-            self.config.signing_public_key_pem = result["signing_public_key_pem"]
-            self.config.signing_key_version = result.get("signing_key_version")
+        self._merge_signing_keys(result.get("signing_public_keys"))
         self.config.save(self.config_path)
         LOG.info("enrolled device %s", self.config.device_id)
 
@@ -88,37 +86,55 @@ class LinuxAgent:
         self.config.device_id = result["device_id"]
         self.config.agent_token = result["agent_token"]
         self.config.tenant_id = result["tenant_id"]
-        if result.get("signing_public_key_pem"):
-            self.config.signing_public_key_pem = result["signing_public_key_pem"]
-            self.config.signing_key_version = result.get("signing_key_version")
+        self._merge_signing_keys(result.get("signing_public_keys"))
         self.config.save(self.config_path)
         LOG.info("enrolled device %s via enrollment token", self.config.device_id)
 
-    def ensure_signing_key(self) -> None:
-        """Trust-on-first-use pinning for agents enrolled before signed job
-        envelopes existed, or whose config lost the key some other way. Once
-        pinned, the key is never silently replaced — a control-plane key
-        change makes every future envelope fail verification (fail closed)
-        until an operator clears ``signing_public_key_pem`` locally to
-        deliberately re-pin, rather than the agent trusting a new key
-        automatically.
+    def _merge_signing_keys(self, keys: dict[str, str] | None) -> bool:
+        """Adds any version this agent doesn't already trust; never
+        overwrites an already-pinned version's PEM value -- see
+        ``AgentConfig.signing_public_keys``'s docstring and
+        ``helpdesktool/job_signing.py``'s module docstring for the
+        rotation model this supports. Returns whether anything changed, so
+        callers only persist to disk when there's something new to save.
         """
-        if self.config.signing_public_key_pem:
-            return
+        changed = False
+        for version_str, pem in (keys or {}).items():
+            version = int(version_str)
+            if version not in self.config.signing_public_keys:
+                self.config.signing_public_keys[version] = pem
+                changed = True
+                LOG.info(
+                    "pinned job-signing key version %s for device %s",
+                    version,
+                    self.config.device_id,
+                )
+        return changed
+
+    def ensure_signing_key(self) -> None:
+        """Refreshes the locally-trusted signing-key set every cycle (one
+        cheap GET, alongside the heartbeat this already runs next to) so a
+        key rotated on the control plane is picked up automatically within
+        one heartbeat interval — no manual "clear the pinned key" step
+        required, unlike before this existed. ``_merge_signing_keys`` never
+        overwrites an already-pinned version's value, only ever adds
+        genuinely new ones, so this can never let a compromised or
+        misbehaving control plane silently swap out a key version this
+        agent already trusts.
+        """
         device_id, token = self._identity()
-        response = self.client.request(
-            "GET",
-            f"/v1/devices/{device_id}/signing-key",
-            headers=self.client.agent_headers(token),
-        )
-        self.config.signing_public_key_pem = response["public_key_pem"]
-        self.config.signing_key_version = response.get("key_version")
-        self.config.save(self.config_path)
-        LOG.info(
-            "pinned job-signing key version %s for device %s",
-            self.config.signing_key_version,
-            device_id,
-        )
+        try:
+            response = self.client.request(
+                "GET",
+                f"/v1/devices/{device_id}/signing-key",
+                headers=self.client.agent_headers(token),
+            )
+        except ApiError:
+            if self.config.signing_public_keys:
+                return
+            raise
+        if self._merge_signing_keys(response.get("signing_public_keys")):
+            self.config.save(self.config_path)
 
     def run_once(self) -> None:
         self.enroll()
@@ -278,13 +294,12 @@ class LinuxAgent:
         self, envelope: dict[str, Any], *, job_id: str | None
     ) -> dict[str, Any]:
         device_id, _ = self._identity()
-        public_key = self.config.signing_public_key_pem
-        if not public_key:
+        if not self.config.signing_public_keys:
             return self._invalid("no pinned job-signing key available")
         try:
             verify_envelope(
                 envelope,
-                public_key_pem=public_key,
+                public_keys=self.config.signing_public_keys,
                 expected_device_id=device_id,
                 expected_tenant_id=self.config.tenant_id,
                 supported_skill_versions=SUPPORTED_SKILL_VERSIONS,

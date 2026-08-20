@@ -11,8 +11,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from tests.support import agent_signing_public_key_pem, build_signed_job_envelope
+from tests.support import agent_signing_public_keys, build_signed_job_envelope
 from windows_agent.agent import WindowsAgent
+from windows_agent.client import ApiError
 from windows_agent.config import AgentConfig
 from windows_agent.executor import ServiceRestartExecutor, ServiceState
 
@@ -52,8 +53,7 @@ def build_agent(
         "device-1",
         "token",
         allowed_services=("Spooler",),
-        signing_public_key_pem=agent_signing_public_key_pem(),
-        signing_key_version=1,
+        signing_public_keys=agent_signing_public_keys(),
     )
     return WindowsAgent(
         config,
@@ -124,8 +124,7 @@ def test_agent_with_no_allowed_services_disables_remediation(tmp_path):
         "user",
         "device-1",
         "token",
-        signing_public_key_pem=agent_signing_public_key_pem(),
-        signing_key_version=1,
+        signing_public_keys=agent_signing_public_keys(),
     )
     agent = WindowsAgent(
         config,
@@ -140,6 +139,85 @@ def test_agent_with_no_allowed_services_disables_remediation(tmp_path):
     result = agent.execute_job(envelope, job_id=None)
     assert result["success"] is False
     assert "no executor available" in result["error"]
+
+
+class _FakeSigningKeyClient:
+    def __init__(self, responses: list[dict | Exception]) -> None:
+        self._responses = iter(responses)
+
+    def request(self, method, path, *, payload=None, headers=None):
+        value = next(self._responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    @staticmethod
+    def agent_headers(token, idempotency_key=None):
+        return {"Authorization": f"Bearer {token}"}
+
+
+def test_ensure_signing_key_adds_new_versions_without_overwriting_pinned_ones(
+    tmp_path,
+):
+    """Mirrors test_linux_agent.py's coverage of the identical logic:
+    a rotated key is picked up automatically, but a control plane that
+    returned a different PEM for an already-trusted version is ignored."""
+    fake_client = _FakeSigningKeyClient(
+        [
+            {
+                "signing_public_keys": {
+                    "1": "should-be-ignored-different-pem",
+                    "2": "pem-v2",
+                }
+            }
+        ]
+    )
+    config = AgentConfig(
+        "http://localhost",
+        "agent-1",
+        "tenant-1",
+        "user",
+        "device-1",
+        "token",
+        signing_public_keys={1: "pem-v1"},
+    )
+    agent = WindowsAgent(
+        config,
+        tmp_path / "agent.json",
+        client=fake_client,
+        service_manager=FakeServiceManager(),
+        dns_resolver=FakeDnsResolver(),
+    )
+
+    agent.ensure_signing_key()
+
+    assert agent.config.signing_public_keys == {1: "pem-v1", 2: "pem-v2"}
+
+
+def test_ensure_signing_key_tolerates_a_failed_refresh_when_a_key_is_already_cached(
+    tmp_path,
+):
+    fake_client = _FakeSigningKeyClient([ApiError("network blip")])
+    config = AgentConfig(
+        "http://localhost",
+        "agent-1",
+        "tenant-1",
+        "user",
+        "device-1",
+        "token",
+        signing_public_keys={1: "pem-v1"},
+    )
+    agent = WindowsAgent(
+        config,
+        tmp_path / "agent.json",
+        client=fake_client,
+        service_manager=FakeServiceManager(),
+        dns_resolver=FakeDnsResolver(),
+    )
+
+    agent.ensure_signing_key()  # must not raise
+
+    assert agent.config.signing_public_keys == {1: "pem-v1"}
 
 
 def test_recovery_after_crash_during_execution_verifies_without_reexecuting(tmp_path):
@@ -239,8 +317,9 @@ def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
             "device_id": "device-42",
             "tenant_id": "tenant-42",
             "agent_token": "secret-token",
-            "signing_public_key_pem": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n",
-            "signing_key_version": 1,
+            "signing_public_keys": {
+                "1": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n"
+            },
         }
     )
     agent = WindowsAgent(
@@ -255,6 +334,9 @@ def test_enroll_with_token_populates_config_including_tenant_id(tmp_path):
     assert agent.config.device_id == "device-42"
     assert agent.config.tenant_id == "tenant-42"
     assert agent.config.agent_token == "secret-token"
+    assert agent.config.signing_public_keys == {
+        1: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n"
+    }
     reloaded = AgentConfig.load(config_path)
     assert reloaded.tenant_id == "tenant-42"
     assert reloaded.device_id == "device-42"

@@ -16,6 +16,15 @@ class Settings(BaseSettings):
     bootstrap_token: str = "change-me-before-use"
     job_claim_secret: str = "change-me-before-use"
     job_signing_seed: str = "change-me-before-use"
+    # The active key version new envelopes are signed with. Rotation is a
+    # config change, not a code deploy or new secret: since each version's
+    # keypair is deterministically derived from job_signing_seed *and* its
+    # own version number (helpdesktool/job_signing.py), bumping this value
+    # alone produces a genuinely different keypair while the previous
+    # version's key remains derivable (and thus still verifiable) from the
+    # same unchanged seed for job_signing_key_rotation_window versions back.
+    job_signing_key_version: int = 1
+    job_signing_key_rotation_window: int = 1
     environment: str = "development"
     allow_insecure_header_auth: bool = True
     development_login_enabled: bool = True

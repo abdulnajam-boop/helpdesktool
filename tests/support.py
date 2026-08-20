@@ -33,10 +33,16 @@ def generate_test_keypair() -> tuple[Any, Any]:
 TEST_JOB_SIGNING_SEED = "test-job-signing-seed"
 
 
-def agent_signing_public_key_pem() -> str:
+def agent_signing_public_key_pem(version: int = 1) -> str:
     from helpdesktool.job_signing import public_key_pem
 
-    return public_key_pem(TEST_JOB_SIGNING_SEED)
+    return public_key_pem(TEST_JOB_SIGNING_SEED, version)
+
+
+def agent_signing_public_keys(*versions: int) -> dict[int, str]:
+    """The ``AgentConfig.signing_public_keys`` shape a test agent needs --
+    defaults to just version 1 if none are given."""
+    return {v: agent_signing_public_key_pem(v) for v in (versions or (1,))}
 
 
 def build_signed_job_envelope(
@@ -77,7 +83,7 @@ def build_signed_job_envelope(
         "nonce": nonce,
         "key_version": key_version,
     }
-    envelope["signature"] = sign_envelope(envelope, seed_secret)
+    envelope["signature"] = sign_envelope(envelope, seed_secret, key_version)
     envelope["claim_token"] = claim_token
     envelope["attempt"] = attempt
     envelope["lease_expires_at"] = envelope["expires_at"]

@@ -51,6 +51,7 @@ Priority tiers, per the governing mandate:
 | Durable execution journal crash recovery | Unit/integration-tested (`tests/test_execution_journal.py`); a genuinely killed-and-restarted agent process was verified manually in an earlier session pass, not repeated this pass (no code changed there). Real future work: an automated (not manual) crash-recovery test harness. |
 | Idempotency/loop prevention for the *new* connector-request pipeline | **CLOSED** — `helpdesktool/connector_request_reaper.py` (`helpdesk-connector-request-reaper` entry point/Compose service) sweeps `ConnectorRequest` rows stuck `pending_approval` past `Settings.connector_request_stale_after_hours` (default 24h) and marks them `expired` with an audit event. Not a claim/lease recovery like `lease_reaper` (a connector request has no agent claim step to lose) — a staleness sweep on "no approver ever decided," with no auto-retry (a still-wanted request is resubmitted by a human). |
 | mTLS / certificate lifecycle | Evaluated and deliberately deferred in an earlier pass (documented reasoning in `IMPLEMENTATION_PLAN.md`); unchanged this pass. |
+| Job-signing key rotation (`job_signing.py`'s previously-documented limitation) | **CLOSED this pass (Milestone 27)** — bumping `Settings.job_signing_key_version` alone (a config change, no new secret, no code deploy) now derives a genuinely different Ed25519 keypair from the same seed; `active_public_keys` exposes a trailing window of still-trusted versions, and both agents' `ensure_signing_key` refreshes its locally-trusted set every cycle, only ever adding new versions, never overwriting an already-pinned one. Verified end-to-end via a real API test that rotates the version mid-test and confirms both the pre- and post-rotation envelopes still verify (`tests/test_job_envelope_api.py::test_signing_key_rotation_keeps_the_old_version_verifiable`), plus against a real disposable Postgres container. A full break-glass rotation invalidating every version at once still requires changing `job_signing_seed` itself — a separate, heavier, deliberately distinct action. |
 
 ## P3 — Automation
 
@@ -126,7 +127,7 @@ itself from going stale relative to it:
   closing the diagnosis-only half of Phase 14's simulation-mode
   requirement.
 
-## What changed in Milestones 22-26
+## What changed in Milestones 22-27
 
 - (docs) Refreshed this document against Milestones 13-21 (Milestone 22);
   no code changes.
@@ -172,6 +173,15 @@ itself from going stale relative to it:
   every high-risk connector request, on top of the pre-existing
   separation-of-duties rule (an approver other than the requester) —
   neither alone was sufficient; both are now required.
+- (P2) **Job-signing key rotation (Milestone 27)** — closes the
+  `job_signing.py`-documented limitation directly. Rotation is now a
+  config change (bump `Settings.job_signing_key_version`), not a new
+  secret or a code deploy; both agents automatically pick up a rotated
+  key within one heartbeat interval via a refreshed trailing window of
+  trusted versions, never losing trust in an already-pinned one. Verified
+  end-to-end, not just reasoned about: a real API test rotates the
+  version mid-test and proves both the old and new envelopes still
+  verify.
 
 Continuing into the next highest-priority item per the mandate's explicit
 instruction not to stop between phases.

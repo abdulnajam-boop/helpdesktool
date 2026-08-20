@@ -42,7 +42,7 @@ def test_valid_envelope_verifies_successfully():
     envelope = _envelope()
     verify_envelope(
         envelope,
-        public_key_pem=public_key_pem(SEED),
+        public_keys={1: public_key_pem(SEED)},
         expected_device_id="device-1",
         expected_tenant_id="tenant-1",
         supported_skill_versions={"service.restart": frozenset({1})},
@@ -79,7 +79,7 @@ def test_verify_envelope_rejects_addressing_and_version_mismatches(
     with pytest.raises(EnvelopeError, match=expected_substring):
         verify_envelope(
             envelope,
-            public_key_pem=public_key_pem(SEED),
+            public_keys={1: public_key_pem(SEED)},
             expected_device_id="device-1",
             expected_tenant_id="tenant-1",
             supported_skill_versions={"service.restart": frozenset({1})},
@@ -93,7 +93,7 @@ def test_verify_envelope_rejects_expired_envelope():
     with pytest.raises(EnvelopeError, match="expired"):
         verify_envelope(
             envelope,
-            public_key_pem=public_key_pem(SEED),
+            public_keys={1: public_key_pem(SEED)},
             expected_device_id="device-1",
             expected_tenant_id="tenant-1",
             supported_skill_versions={"service.restart": frozenset({1})},
@@ -106,7 +106,7 @@ def test_verify_envelope_rejects_missing_fields():
     with pytest.raises(EnvelopeError, match="malformed"):
         verify_envelope(
             envelope,
-            public_key_pem=public_key_pem(SEED),
+            public_keys={1: public_key_pem(SEED)},
             expected_device_id="device-1",
             expected_tenant_id="tenant-1",
             supported_skill_versions={"service.restart": frozenset({1})},
@@ -119,7 +119,7 @@ def test_verify_envelope_rejects_invalid_signature():
     with pytest.raises(EnvelopeError, match="invalid job envelope signature"):
         verify_envelope(
             envelope,
-            public_key_pem=public_key_pem(SEED),
+            public_keys={1: public_key_pem(SEED)},
             expected_device_id="device-1",
             expected_tenant_id="tenant-1",
             supported_skill_versions={"service.restart": frozenset({1})},
@@ -129,3 +129,57 @@ def test_verify_envelope_rejects_invalid_signature():
 def test_public_key_derivation_is_stable_and_seed_specific():
     assert public_key_pem(SEED) == public_key_pem(SEED)
     assert public_key_pem(SEED) != public_key_pem("another-seed")
+
+
+# --- key rotation (Milestone 27) ---------------------------------------
+
+
+def test_public_key_derivation_differs_by_version_from_the_same_seed():
+    """The whole rotation mechanism depends on this: bumping the version
+    number alone, with no new secret, produces a genuinely different
+    keypair -- see helpdesktool/job_signing.py's module docstring."""
+    assert public_key_pem(SEED, 1) != public_key_pem(SEED, 2)
+    assert public_key_pem(SEED, 2) == public_key_pem(SEED, 2)
+
+
+def test_envelope_signed_with_a_newer_key_version_verifies_when_agent_trusts_it():
+    envelope = _envelope(key_version=2)
+    envelope["signature"] = sign_envelope(envelope, SEED, 2)
+    verify_envelope(
+        envelope,
+        public_keys={1: public_key_pem(SEED, 1), 2: public_key_pem(SEED, 2)},
+        expected_device_id="device-1",
+        expected_tenant_id="tenant-1",
+        supported_skill_versions={"service.restart": frozenset({1})},
+    )
+
+
+def test_envelope_signed_with_an_untrusted_key_version_is_rejected():
+    """An agent that has only ever pinned version 1 must fail closed on a
+    version-2-signed envelope until it independently trusts version 2 too
+    -- it can never be tricked into accepting an unrecognized version just
+    because the envelope claims one."""
+    envelope = _envelope(key_version=2)
+    envelope["signature"] = sign_envelope(envelope, SEED, 2)
+    with pytest.raises(EnvelopeError, match="invalid job envelope signature"):
+        verify_envelope(
+            envelope,
+            public_keys={1: public_key_pem(SEED, 1)},
+            expected_device_id="device-1",
+            expected_tenant_id="tenant-1",
+            supported_skill_versions={"service.restart": frozenset({1})},
+        )
+
+
+def test_an_old_still_trusted_key_version_keeps_verifying_after_rotation():
+    """The transition-window property: version 1 stays valid even after
+    the control plane has moved its *current* signing version to 2, as
+    long as an agent still trusts it."""
+    envelope = _envelope(key_version=1)
+    verify_envelope(
+        envelope,
+        public_keys={1: public_key_pem(SEED, 1), 2: public_key_pem(SEED, 2)},
+        expected_device_id="device-1",
+        expected_tenant_id="tenant-1",
+        supported_skill_versions={"service.restart": frozenset({1})},
+    )

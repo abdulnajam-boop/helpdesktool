@@ -2922,6 +2922,86 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > IT admin" trust boundary every real-world helpdesk already relies on),
 > not something this pass invents infrastructure for.
 
+> **Milestone 27 — job-signing key rotation (DONE, 2026-08-20).** Answers
+> the mandate's priority-5 instruction ("close remaining production
+> security gaps: ... signing-key rotation ..."). `job_signing.py`'s own
+> module docstring had documented this as out of scope since Milestone 3:
+> an agent that already pinned a public key would fail closed forever if
+> the control plane's derived key ever changed, with no way to recover
+> short of an operator manually clearing the agent's local
+> `signing_public_key_pem`.
+>
+> **The key insight, already latent in the existing design:** a version's
+> keypair was always derived from *both* `Settings.job_signing_seed` and
+> its own version number (`SHA256(f"...-v{version}:{seed}")`). That means
+> rotation doesn't need a second secret at all — bumping
+> `Settings.job_signing_key_version` alone produces a genuinely different
+> keypair, while the *previous* version's key remains independently
+> derivable (and thus still verifiable) from the same unchanged seed. This
+> pass made that mechanism real rather than latent:
+> - `job_signing.py`: `_private_key`/`public_key_pem`/`sign_envelope` now
+>   take an explicit `version` parameter instead of a hardcoded
+>   `CURRENT_KEY_VERSION` constant; new `active_public_keys(seed, current,
+>   window)` returns the version→PEM map for the current version down
+>   through a trailing window (`Settings.job_signing_key_rotation_window`,
+>   default 1).
+> - `agent_common/signing.py`: `verify_envelope` now takes `public_keys:
+>   Mapping[int, str]` instead of a single `public_key_pem: str`, looking
+>   up the envelope's own `key_version` field in that map — an unrecognized
+>   version fails identically to an invalid signature (same error, same
+>   position in the fixed check order), never a distinct failure mode.
+> - `linux_agent`/`windows_agent`'s `AgentConfig.signing_public_key_pem`/
+>   `signing_key_version` (a single pair) became `signing_public_keys:
+>   dict[int, str]`; `AgentConfig.load` transparently migrates an
+>   old-format on-disk config so an already-enrolled agent keeps its
+>   pinned key rather than needing to re-enroll.
+> - Both agents' `ensure_signing_key` changed from "fetch once, ever" to
+>   refreshing the trusted-key set **every cycle** (one cheap GET,
+>   alongside the heartbeat this already runs next to) via a new
+>   `_merge_signing_keys` helper that only ever *adds* a version this
+>   agent doesn't already trust — never overwrites an already-pinned
+>   version's PEM, so a compromised or misbehaving control plane can never
+>   silently swap out a key an agent already trusts. This is what makes
+>   rotation actually *automatic*: no more manual "clear the pinned key"
+>   step.
+> - `api.py`: the enrollment endpoints and the dedicated signing-key
+>   endpoint all now return `signing_public_keys` (the same version→PEM
+>   map) via one shared `_active_signing_keys()` helper instead of three
+>   independent single-key call sites; `claim_job`'s envelope construction
+>   signs with `Settings.job_signing_key_version` explicitly.
+>
+> **Tests:** `tests/test_agent_common_signing.py` gained 4 new rotation
+> tests (derivation differs by version from the same seed; a
+> newer-version-signed envelope verifies once trusted; an untrusted
+> version is rejected; an old version stays valid after the *current*
+> version moves on). `tests/test_job_envelope_api.py` gained a real
+> end-to-end API test (`test_signing_key_rotation_keeps_the_old_version_
+> verifiable`) that rotates `job_signing_key_version` mid-test via
+> `monkeypatch.setenv`/`get_settings.cache_clear()` and proves both the
+> pre- and post-rotation envelopes verify against the refreshed signing-key
+> endpoint's response. `tests/test_linux_agent.py`/`tests/
+> test_windows_agent.py` gained unit tests for `ensure_signing_key`'s merge
+> semantics (adds new versions, never overwrites a pinned one, tolerates a
+> failed refresh when a key is already cached, propagates a failed refresh
+> when none is). Every existing test constructing an `AgentConfig` with the
+> old `signing_public_key_pem`/`signing_key_version` fields was updated to
+> the new `signing_public_keys` dict shape (a genuine breaking change to
+> that config's on-disk shape, mitigated by `AgentConfig.load`'s migration
+> path) — `tests/support.py` gained `agent_signing_public_keys()` to match.
+> `ruff`/`ruff format --check`/`mypy --strict`/`python -m compileall`
+> clean; full `pytest` suite re-run against both SQLite and a real
+> disposable Postgres container (`alembic upgrade head` confirmed no
+> schema changed — this pass is pure application logic, no new migration)
+> with only the same 4 known pre-existing Windows-only failures — no new
+> regressions in either tier.
+>
+> Not done, explicitly out of scope: a full break-glass rotation that
+> invalidates *every* existing key version at once still requires changing
+> `job_signing_seed` itself (every agent then re-pins from scratch) — this
+> pass's mechanism handles routine/scheduled rotation and single-version
+> compromise recovery, not a "burn everything down" scenario, which is a
+> deliberately heavier, separate action.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
