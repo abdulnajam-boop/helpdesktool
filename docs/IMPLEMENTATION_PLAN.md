@@ -1889,6 +1889,137 @@ configurable approval policy, and exportable/auditable compliance evidence.
 
 ---
 
+### Milestone 11 — Omnichannel help desk foundation (IN PROGRESS, started 2026-08-20)
+
+> **Scope note:** this milestone is a large, explicit mandate (channel
+> adapters for Teams/Slack/Google Chat/web, identity resolution, an
+> application connector framework with password-reset/unlock/MFA-reset,
+> an AI conversation engine, a tenant-aware knowledge system, a full
+> UI/UX modernization across ~15 pages, mTLS/cert rotation/key rotation/
+> SBOM/release signing, a dependency-provenance audit, Terraform/staging/
+> production deployment, and full E2E coverage across every channel).
+> This is genuinely weeks of engineering, not a single pass — what
+> follows is the real, working **foundation** this pass built, with
+> everything not yet started listed plainly rather than implied done.
+>
+> **What was actually built and verified this pass — the vertical slice
+> proving the whole architecture end to end (web channel only):**
+> - `helpdesktool/connectors/` (new package): `ApplicationConnector`
+>   Protocol (`resolve_user`/`check_account`/`reset_password`/
+>   `unlock_account`/`reset_mfa`/`check_permissions`/`verify_result`),
+>   `ConnectorResult`, risk classification
+>   (`HIGH_RISK_OPERATIONS`/`READ_ONLY_OPERATIONS`), `ConnectorRegistry`.
+>   `connectors/mock.py`: a real, working, dev-safe connector
+>   implementation (in-memory demo accounts) — the same "provable with no
+>   external credentials" role `ai/provider.py`'s
+>   `DeterministicFallbackProvider` already plays for AI diagnosis.
+> - `helpdesktool/identity_resolution.py`: maps an already-authenticated
+>   channel identity to a Helpdesktool `User` by exact email match within
+>   a tenant — explicitly never from unverified chat message text (see
+>   its module docstring for why that distinction is the single most
+>   important invariant in the whole omnichannel design). The web channel
+>   IS its own already-authenticated session for this pass; future
+>   Slack/Teams/Google Chat adapters resolve their own signature-verified
+>   provider identity through this same function.
+> - `helpdesktool/conversation.py`: the shared Conversation Service every
+>   channel adapter feeds into (`handle_message`). Deterministic
+>   keyword-based intent classification (`classify_intent`) — not an LLM
+>   call, for the same provability reason as the connector above; a real
+>   NLU/LLM classifier can sit behind the identical `ClassifiedIntent`
+>   contract later. High-risk connector operations always require
+>   approval from someone other than the requester (same separation-of-
+>   duties rule `orchestrator.py` already enforces for `Action` —
+>   deliberately not loosened for "it's my own account").
+> - New tables (migration `0010_connectors_conversations`, all RLS-
+>   protected — `application_connectors`, `conversations`,
+>   `conversation_messages`, `connector_requests`). **Found and fixed a
+>   real bug while verifying this migration for real against Postgres**:
+>   the initial revision id (`0010_connectors_and_conversations`, 33
+>   characters) exceeded Alembic's default `alembic_version.version_num
+>   VARCHAR(32)` column, failing the upgrade with a truncation error —
+>   shortened to `0010_connectors_conversations` (29 chars) and
+>   re-verified: a real `alembic upgrade head` → `downgrade -1` →
+>   `upgrade head` round trip against live Postgres 17, confirmed RLS
+>   policies and `helpdesk_app` grants exist on all four new tables.
+> - New API surface: `POST /v1/chat/message` (the web channel adapter),
+>   `GET /v1/conversations` + `GET /v1/conversations/{id}`, `POST`/`GET
+>   /v1/connectors`, `GET /v1/connector-requests`, `POST
+>   /v1/connector-requests/{id}/decision`.
+> - New frontend pages: `pages/HelpDesk.tsx` (`HelpDesk` chat UI,
+>   `Conversations` history list) and `pages/Applications.tsx` (connector
+>   management + pending-approval list), wired into `App.tsx`'s
+>   navigation as "AI Help Desk" / "Conversations" / "Applications".
+> - **Verified this pass, not just asserted:** 15 new backend tests
+>   (`tests/test_conversation.py`) covering intent classification, the
+>   mock connector's full lifecycle, the real HTTP pipeline end to end
+>   (chat → pending approval → self-approval rejected 403 → independent
+>   admin approves → mock connector executes → verified → audit trail),
+>   denied requests never touching the connector, cross-tenant request
+>   forgery rejected 404, viewer role blocked from deciding, and an
+>   unresolvable target account failing closed rather than silently
+>   succeeding. Full suite green (`ruff`, `ruff format`, `mypy --strict`,
+>   `pytest`) both locally and in a `python:3.13` Linux container against
+>   real Postgres 17. A real browser (Playwright, against a real
+>   Postgres-backed API and built frontend) walked the full flow —
+>   general inquiry creates a ticket, password-reset request appears in
+>   Applications, self-approval correctly impossible, a second admin
+>   approves it, the request clears from the pending list, the
+>   conversation appears in history — with zero console errors.
+>
+> **Deliberately not built this pass — real, scoped, explicitly not
+> hidden as "done":**
+> - **Slack, Microsoft Teams, and Google Chat channel adapters.** No
+>   external SDK has been chosen or vendored yet (the mandate's own
+>   guidance: prefer a declared dependency over vendoring, evaluate
+>   `vercel/chat` for a unified SDK, never make the core product depend
+>   on an externally-hosted repository). The Conversation Service above
+>   is deliberately channel-agnostic already — adding a channel means a
+>   new adapter that verifies that provider's own signature/token and
+>   calls `identity_resolution.resolve_channel_identity` then
+>   `conversation.handle_message`, not new orchestration logic.
+> - **Real (non-mock) application connectors** (Salesforce, Microsoft
+>   365, Google Workspace, Okta, GitHub, generic REST). The `mock`
+>   connector proves the framework's contract and safety properties; a
+>   real one needs a real OAuth/API-key flow per application, which needs
+>   real credentials this environment doesn't have — the connector
+>   *interface* is ready for one to be registered the moment credentials
+>   exist.
+> - **Admin-assist ("reset someone else's password") flows.** This pass
+>   is self-service-only by design (see `conversation.py`'s module
+>   docstring) — a higher-risk, separately-scoped future capability.
+> - **Step-up MFA verification** before a high-risk connector operation
+>   executes. The current gate is human-approval-based (an independent
+>   admin decides); a real step-up challenge (re-auth, a push
+>   notification to the requester's own MFA device) is real, deferred
+>   work, not simulated here.
+> - **A knowledge/solution system** (Section 5 of the mandate — runbooks,
+>   FAQs, resolved-ticket learning, versioned/approved learned
+>   remediation). `general_inquiry` intent currently only creates a
+>   ticket; no knowledge lookup exists yet.
+> - **The full UI/UX modernization** (Section 6) — design tokens, dark/
+>   light mode, the complete navigation set (Overview/Users/Automations/
+>   Knowledge/Security/Analytics), WCAG audit. This pass added two new
+>   pages in the *existing* design language rather than rebuilding it.
+> - **mTLS, certificate rotation, skill-manifest signing/key rotation,
+>   SBOM, release signing** (Section 8) — all pre-existing, documented,
+>   deliberately deferred gaps (see `docs/SECURITY_REVIEW.md`'s residual-
+>   risk section), unchanged this pass.
+> - **The dependency/license/provenance audit** (Section 9 —
+>   `docs/DEPENDENCY_AUDIT.md`/`THIRD_PARTY_LICENSES.md`/
+>   `SOFTWARE_PROVENANCE.md`) — not started this pass.
+> - **Terraform, staging/production deployment, Redis/shared state,
+>   OpenTelemetry, dashboards/alerts/SLOs** (Section 10) — unchanged from
+>   this project's existing `docker compose`-based deployment story; see
+>   `docs/RELEASE_READINESS.md` for what's already verified there
+>   (fresh-from-zero deployment, backup/restore, migration reversibility)
+>   versus genuinely infrastructure-blocked.
+>
+> **Tests:** `tests/test_conversation.py` (15 cases, detailed above).
+> Continuing in subsequent passes per the mandate's explicit instruction
+> not to stop between milestones.
+
+---
+
 ## Open questions to resolve before autonomous execution starts
 
 1. **Target cloud/deployment substrate for Milestone 8** — Kubernetes/Helm vs. a

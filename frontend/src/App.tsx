@@ -4,10 +4,12 @@ import { Callback } from './auth/Callback'
 import { Login } from './auth/Login'
 import { Badge } from './components'
 import { Actions, ActionDetail } from './pages/Actions'
+import { Applications } from './pages/Applications'
 import { Approvals } from './pages/Approvals'
 import { Audit } from './pages/Audit'
 import { Dashboard } from './pages/Dashboard'
 import { DeviceDetail, Devices } from './pages/Devices'
+import { Conversations, HelpDesk } from './pages/HelpDesk'
 import { IncidentDetail, Incidents } from './pages/Incidents'
 import { Integrations } from './pages/Integrations'
 import { Reports } from './pages/Reports'
@@ -23,6 +25,9 @@ const NAVIGATION = [
   ['/incidents', 'Incidents'],
   ['/actions', 'Actions'],
   ['/approvals', 'Approvals'],
+  ['/help-desk', 'AI Help Desk'],
+  ['/conversations', 'Conversations'],
+  ['/applications', 'Applications'],
   ['/skills', 'Skills'],
   ['/reports', 'Reports'],
   ['/audit', 'Audit'],
@@ -39,6 +44,9 @@ function Route({ user }: { user?: Row }) {
   if (resource === 'incidents') return id ? <IncidentDetail id={id} user={user} /> : <Incidents />
   if (resource === 'actions') return id ? <ActionDetail id={id} /> : <Actions user={user} />
   if (resource === 'approvals') return <Approvals user={user} />
+  if (resource === 'help-desk') return <HelpDesk />
+  if (resource === 'conversations') return <Conversations />
+  if (resource === 'applications') return <Applications user={user} />
   if (resource === 'skills') return <Skills user={user} />
   if (resource === 'reports') return <Reports />
   if (resource === 'audit') return <Audit />
