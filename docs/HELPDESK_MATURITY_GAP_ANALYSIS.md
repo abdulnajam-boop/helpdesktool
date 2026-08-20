@@ -40,7 +40,7 @@ Priority tiers, per the governing mandate:
 | Knowledge schema (`IssueDefinition`/`EvidenceRequirement`/`DiagnosticWorkflow`/`DiagnosticStep`/`EscalationPolicy`/`KnowledgeSource`/`MitreMapping`/`CveReference`) | **CLOSED** — `helpdesktool/knowledge.py` (Milestone 13), populated with 10 curated reference issues (Milestone 14). Not modeled as separate schema types (folded into the shapes above instead, which cover the same ground more simply): `Detector`/`VerificationTest`/`OperatingSystemConstraint`/`SoftwareVersionConstraint`/`CommandDefinition` — a `DiagnosticStep`'s `step_type`/`verification_description`/`applicable_os` on `IssueDefinition` already cover what those would have. |
 | Action-preview / dry-run execution surface (Phase 14, beyond diagnosis) | **CLOSED** — see P3 below (`action_preview.py`). |
 | Idempotency/loop prevention for the connector-request pipeline (Phase 8) | **CLOSED** — see P2 below (`connector_request_reaper.py`). |
-| Slack/Teams/Google Chat channel adapters | **Slack DONE this pass** (`helpdesktool/channels/slack.py`, no SDK dependency — stdlib `hmac` only) — real request-signature verification, replay protection, per-tenant workspace/identity link tables, and a live `POST /v1/channels/slack/events/{link_id}` wired into the existing `handle_message`. Outbound reply-sending is BLOCKED-EXTERNAL (needs a live Slack bot token — see `channels/slack.py`'s `SlackReplySender`/`NullSlackReplySender`). Teams/Google Chat are not started — same additive shape, blocked on SDK choice/vendoring, not infrastructure. |
+| Slack/Teams/Google Chat channel adapters | **Slack and Google Chat DONE.** `helpdesktool/channels/slack.py` (Milestone 17) — real request-signature verification, replay protection, per-tenant workspace/identity link tables, `POST /v1/channels/slack/events/{link_id}` wired into `handle_message`; outbound reply is BLOCKED-EXTERNAL (needs a live Slack bot token). `helpdesktool/channels/google_chat.py` (Milestone 25) — real Bearer-ID-token verification reusing `oidc.py`'s `OIDCVerifier` unchanged, `POST /v1/channels/google-chat/events/{link_id}`, and a **synchronous reply that is not BLOCKED-EXTERNAL** (Google Chat's HTTP contract lets an app reply in the same response — the first channel adapter to close the full loop with no external credential dependency). Teams is the one remaining adapter — same additive shape (`ChannelWorkspaceLink`/`ChannelIdentityLink` already generically support a third `channel` value with no new migration needed), not started because the Bot Framework inbound JWT's exact claim shape needs validating against a live registration before it can be built with the same confidence as Google Chat's well-documented contract. |
 | Known-good organizational state (Phase 6) | **CLOSED** — `helpdesktool/baseline.py`'s `BaselineEntry`/`resolve_known_good`, `organizational_baselines` table (migration `0014`, tenant-scoped/RLS-protected), `/v1/baselines` + `/v1/baselines/resolve` API. Precedence: device_baseline > user_baseline > organizational_policy > generic_best_practice; `current_state` is never itself a valid resolution. Verified against real Postgres RLS: tenant A's baseline is invisible to tenant B's `resolve` call. Not yet wired into any live diagnosis/remediation code path — same "ship as inert, reviewable data first" pattern as the Milestone 13 knowledge schema. |
 
 ## P2 — Endpoint reliability
@@ -64,7 +64,7 @@ Priority tiers, per the governing mandate:
 | Gap | Status |
 |---|---|
 | Real (non-mock) application connectors | BLOCKED-EXTERNAL (credentials). |
-| Slack/Teams/Google Chat adapters | Slack done (see P1). Teams/Google Chat not started. |
+| Slack/Teams/Google Chat adapters | Slack and Google Chat done (see P1). Teams not started. |
 | Knowledge provenance tracking (Phase 12) | **Schema/tracking DONE, automated ingestion NOT.** `KnowledgeSourceRow` (source_organization/source_url/retrieval_date/last_verified_date/source_reliability/deprecated/superseded_by, Milestone 13) exists and is populated (Milestone 14's 10 reference issues are honestly attributed to a single internal `KnowledgeSource`, not a fabricated external citation). What's still genuinely missing: an automated pipeline that fetches/parses real external knowledge sources (a CVE feed, a vendor KB) and proposes new `IssueDefinition` records for human review — today every knowledge record is hand-authored. |
 | MITRE/CVE mapping tables | **DONE** — `MitreMapping`/`CveReference` in `helpdesktool/knowledge.py` (Milestone 13), both structurally validated (technique-id/CVE-id regex) and exercised by real reference content (Milestone 14). |
 
@@ -125,7 +125,7 @@ itself from going stale relative to it:
   closing the diagnosis-only half of Phase 14's simulation-mode
   requirement.
 
-## What changed in Milestones 22-24
+## What changed in Milestones 22-25
 
 - (docs) Refreshed this document against Milestones 13-21 (Milestone 22);
   no code changes.
@@ -150,6 +150,19 @@ itself from going stale relative to it:
   round-tripped cleanly) and, unusually for this codebase's Windows-only
   pieces, against a real Windows host directly (`Win32DnsResolver().flush()`
   called live, returned success) — not merely reasoned about.
+- (P1/P4) **Second omnichannel adapter: Google Chat (Milestone 25)**,
+  reusing `oidc.py`'s `OIDCVerifier` unchanged rather than writing a
+  second JWT/JWKS implementation — Google Chat's inbound Bearer token is
+  a standard RS256 JWT against a published JWKS, so verifying it is a
+  configuration change (issuer/JWKS/audience), the same "swap providers,
+  not code" property `oidc.py` already gives human OIDC login. The first
+  channel adapter whose reply is not BLOCKED-EXTERNAL: Google Chat's HTTP
+  contract supports a synchronous JSON reply in the same response, so the
+  full identity → conversation → ticket → reply loop is real end-to-end
+  here, unlike Slack's still-BLOCKED-EXTERNAL bot-token reply path.
+  `ChannelWorkspaceLink`/`ChannelIdentityLink` needed no new migration —
+  their `channel` column was already a plain string, not a Slack-specific
+  enum.
 
 Continuing into the next highest-priority item per the mandate's explicit
 instruction not to stop between phases.

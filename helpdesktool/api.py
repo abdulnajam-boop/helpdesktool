@@ -29,6 +29,12 @@ from .auth import (
 )
 from .baseline import BaselineEntry, BaselineValidationError, resolve_known_good
 from .channels import ChannelSigningError
+from .channels.google_chat import (
+    build_google_chat_reply,
+    build_google_chat_verifier,
+    parse_google_chat_event,
+    verify_google_chat_request,
+)
 from .channels.slack import (
     NullSlackReplySender,
     parse_slack_event,
@@ -2235,6 +2241,101 @@ async def slack_events(
         channel_id=envelope.channel_id, thread_ts=envelope.thread_ts, text=result.reply
     )
     return Response(status_code=204)
+
+
+@app.post("/v1/channels/google-chat/events/{link_id}")
+async def google_chat_events(
+    link_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Any:
+    """The Google Chat HTTP endpoint app's webhook target. Unauthenticated
+    by design, like ``slack_events`` above -- trust comes entirely from
+    Google's own signed Bearer ID token, verified against the audience
+    (Cloud project number) the matching ``ChannelWorkspaceLink`` declares.
+    Unlike Slack, this app replies **synchronously in the HTTP response
+    body itself** -- see ``channels/google_chat.py``'s module docstring
+    for why that closes the reply loop without a BLOCKED-EXTERNAL bot
+    token dependency.
+    """
+    with resolving_identity(session):
+        link = session.get(ChannelWorkspaceLink, link_id)
+    if link is None or not link.active or link.channel != "google_chat":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown channel link")
+    set_tenant_context(session, link.tenant_id)
+
+    try:
+        verify_google_chat_request(
+            build_google_chat_verifier(link.workspace_id),
+            request.headers.get("Authorization", ""),
+        )
+    except ChannelSigningError as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+    payload = await request.json()
+    envelope = parse_google_chat_event(payload)
+    if envelope is None:
+        return Response(status_code=204)
+
+    cached = idempotency_lookup(
+        session, link.tenant_id, "google_chat_event", envelope.event_id, payload
+    )
+    if cached is not None:
+        return cached
+
+    identity_link = session.scalar(
+        select(ChannelIdentityLink).where(
+            ChannelIdentityLink.tenant_id == link.tenant_id,
+            ChannelIdentityLink.channel == "google_chat",
+            ChannelIdentityLink.provider_user_id == envelope.user_name,
+        )
+    )
+    user = (
+        session.get(User, identity_link.user_id) if identity_link is not None else None
+    )
+    if user is None or not user.active:
+        audit(
+            session,
+            link.tenant_id,
+            link.id,
+            "channel_message.unresolved_identity",
+            "system:google_chat_adapter",
+            {"provider_user_id": envelope.user_name, "channel": "google_chat"},
+        )
+        reply_body = build_google_chat_reply(
+            "I couldn't match your Google Chat account to a Helpdesktool user. "
+            "Please ask an administrator to link your account."
+        )
+        remember(
+            session,
+            link.tenant_id,
+            "google_chat_event",
+            envelope.event_id,
+            payload,
+            reply_body,
+        )
+        session.commit()
+        return reply_body
+
+    result = handle_message(
+        session,
+        link.tenant_id,
+        user,
+        channel="google_chat",
+        channel_thread_id=envelope.space_name,
+        message=envelope.text,
+    )
+    reply_body = build_google_chat_reply(result.reply)
+    remember(
+        session,
+        link.tenant_id,
+        "google_chat_event",
+        envelope.event_id,
+        payload,
+        reply_body,
+    )
+    session.commit()
+    return reply_body
 
 
 @app.get("/v1/conversations")
