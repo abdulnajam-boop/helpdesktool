@@ -106,6 +106,10 @@ UNSCOPED_APPLICATION_TABLES: tuple[str, ...] = (
     "tenants",
     "skills",
     "worker_heartbeats",
+    "knowledge_sources",
+    "issue_definitions",
+    "diagnostic_workflows",
+    "diagnostic_steps",
 )
 
 # Sequences backing the two integer-autoincrement primary keys in the schema
