@@ -541,3 +541,94 @@ class ConnectorRequest(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class KnowledgeSourceRow(Base):
+    """Provenance for an imported knowledge record (Phase 12). Platform-
+    wide/unscoped like ``skills`` — a source's provenance isn't owned by
+    any one tenant.
+    """
+
+    __tablename__ = "knowledge_sources"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_organization: Mapped[str] = mapped_column(String(200))
+    source_url: Mapped[str] = mapped_column(String(2048), default="")
+    retrieval_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_verified_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_reliability: Mapped[float] = mapped_column(Float, default=0.5)
+    deprecated: Mapped[bool] = mapped_column(Boolean, default=False)
+    superseded_by: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_sources.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class IssueDefinitionRow(Base):
+    """A versioned, integrity-checked description of a recognizable IT
+    issue (Phase 1). Platform-wide/unscoped like ``skills`` — see
+    ``helpdesktool/knowledge.py``'s module docstring for the full trust
+    model, in particular why this can never itself describe *how* a
+    remediation executes, only which already-registered skill (if any) is
+    relevant.
+    """
+
+    __tablename__ = "issue_definitions"
+    __table_args__ = (UniqueConstraint("issue_key", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    issue_key: Mapped[str] = mapped_column(String(200), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(50))
+    applicable_os: Mapped[list[str]] = mapped_column(JSON)
+    applicable_software_versions: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict
+    )
+    evidence_requirements: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list
+    )
+    mitre_mappings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    cve_references: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    escalation_policy: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_sources.id", ondelete="SET NULL")
+    )
+    validated: Mapped[bool] = mapped_column(Boolean, default=False)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiagnosticWorkflowRow(Base):
+    __tablename__ = "diagnostic_workflows"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    issue_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("issue_definitions.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiagnosticStepRow(Base):
+    __tablename__ = "diagnostic_steps"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("diagnostic_workflows.id", ondelete="CASCADE"), index=True
+    )
+    step_order: Mapped[int] = mapped_column(Integer)
+    step_type: Mapped[str] = mapped_column(String(30))
+    description: Mapped[str] = mapped_column(Text, default="")
+    remediation_skill_id: Mapped[str | None] = mapped_column(String(200))
+    verification_description: Mapped[str] = mapped_column(Text, default="")
+    rollback_skill_id: Mapped[str | None] = mapped_column(String(200))
+    reference_description: Mapped[str] = mapped_column(Text, default="")

@@ -42,11 +42,15 @@ from .db_models import (
     Device,
     DeviceInventory,
     Diagnosis,
+    DiagnosticStepRow,
+    DiagnosticWorkflowRow,
     EnrollmentToken,
     ExecutionResultRow,
     Heartbeat,
     IdempotencyRecord,
     Incident,
+    IssueDefinitionRow,
+    KnowledgeSourceRow,
     SkillManifestRow,
     Tenant,
     Ticket,
@@ -64,6 +68,16 @@ from .hardening import (
 from .incidents import detect_inventory_incidents, incident_json
 from .integrations import validate_webhook_url
 from .job_signing import CURRENT_KEY_VERSION, public_key_pem, sign_envelope
+from .knowledge import (
+    CveReference,
+    DiagnosticStep,
+    EscalationPolicy,
+    EvidenceRequirement,
+    IssueDefinition,
+    KnowledgeValidationError,
+    MitreMapping,
+    validate_remediation_skill_references,
+)
 from .logging_config import configure_logging, set_request_id
 from .metrics import (
     DEVICE_ONLINE_THRESHOLD,
@@ -90,10 +104,13 @@ from .schemas import (
     ConnectorRequestDecision,
     DeviceEnroll,
     DeviceRevoke,
+    DiagnosticWorkflowCreate,
     EnrollmentTokenCreate,
     HeartbeatCreate,
     InventoryCreate,
+    IssueDefinitionCreate,
     JobResult,
+    KnowledgeSourceCreate,
     LowDiskSimulation,
     SkillManifestCreate,
     TenantCreate,
@@ -1351,6 +1368,374 @@ def create_skill_manifest(
     result = skill_manifest_json(row)
     session.commit()
     return result
+
+
+def knowledge_source_json(row: KnowledgeSourceRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "source_organization": row.source_organization,
+        "source_url": row.source_url,
+        "retrieval_date": row.retrieval_date,
+        "last_verified_date": row.last_verified_date,
+        "source_reliability": row.source_reliability,
+        "deprecated": row.deprecated,
+        "superseded_by": row.superseded_by,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+    }
+
+
+@app.post("/v1/knowledge/sources", status_code=201)
+def create_knowledge_source(
+    body: KnowledgeSourceCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    row = KnowledgeSourceRow(
+        source_organization=body.source_organization,
+        source_url=body.source_url,
+        retrieval_date=body.retrieval_date,
+        last_verified_date=body.last_verified_date,
+        source_reliability=body.source_reliability,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    session.flush()
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "knowledge_source.registered",
+        principal.actor_id,
+        {"source_organization": row.source_organization},
+    )
+    result = knowledge_source_json(row)
+    session.commit()
+    return result
+
+
+@app.get("/v1/knowledge/sources")
+def list_knowledge_sources(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(KnowledgeSourceRow).order_by(KnowledgeSourceRow.created_at.desc())
+    ).all()
+    return [knowledge_source_json(row) for row in rows]
+
+
+def _issue_definition_from_row(row: IssueDefinitionRow) -> IssueDefinition:
+    return IssueDefinition(
+        issue_key=row.issue_key,
+        version=row.version,
+        title=row.title,
+        description=row.description,
+        category=row.category,
+        applicable_os=frozenset(row.applicable_os),
+        source_id=row.source_id,
+        applicable_software_versions=row.applicable_software_versions,
+        evidence_requirements=tuple(
+            EvidenceRequirement(
+                item["name"], item.get("description", ""), item["required"]
+            )
+            for item in row.evidence_requirements
+        ),
+        mitre_mappings=tuple(
+            MitreMapping(
+                item["technique_id"],
+                item.get("tactic", ""),
+                item.get("mapping_confidence", 0.5),
+                item.get("mapping_evidence", ""),
+            )
+            for item in row.mitre_mappings
+        ),
+        cve_references=tuple(
+            CveReference(item["cve_id"], item.get("applicable_versions", ""))
+            for item in row.cve_references
+        ),
+        escalation_policy=(
+            EscalationPolicy(**row.escalation_policy) if row.escalation_policy else None
+        ),
+    )
+
+
+def issue_definition_json(row: IssueDefinitionRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "issue_key": row.issue_key,
+        "version": row.version,
+        "title": row.title,
+        "description": row.description,
+        "category": row.category,
+        "applicable_os": row.applicable_os,
+        "applicable_software_versions": row.applicable_software_versions,
+        "evidence_requirements": row.evidence_requirements,
+        "mitre_mappings": row.mitre_mappings,
+        "cve_references": row.cve_references,
+        "escalation_policy": row.escalation_policy,
+        "source_id": row.source_id,
+        "validated": row.validated,
+        "content_hash": row.content_hash,
+        "active": row.active,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+    }
+
+
+@app.post("/v1/knowledge/issues", status_code=201)
+def create_issue_definition(
+    body: IssueDefinitionCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Registers a new (or new-version) issue definition. ``validated``
+    means this record passed structural validation (well-formed MITRE/CVE
+    ids, non-empty required fields, ...) — it does NOT mean any referenced
+    remediation has been reviewed for correctness; that remains a human
+    judgment call. See ``helpdesktool/knowledge.py``'s module docstring:
+    this is reference data, never itself executable, regardless of
+    ``validated``.
+    """
+    try:
+        evidence_requirements = tuple(
+            EvidenceRequirement(item.name, item.description, item.required)
+            for item in body.evidence_requirements
+        )
+        mitre_mappings = tuple(
+            MitreMapping(
+                item.technique_id,
+                item.tactic,
+                item.mapping_confidence,
+                item.mapping_evidence,
+            )
+            for item in body.mitre_mappings
+        )
+        cve_references = tuple(
+            CveReference(item.cve_id, item.applicable_versions)
+            for item in body.cve_references
+        )
+        escalation_policy = (
+            EscalationPolicy(
+                body.escalation_policy.condition,
+                body.escalation_policy.escalate_to_role,
+                body.escalation_policy.priority,
+            )
+            if body.escalation_policy
+            else None
+        )
+        previous = session.scalar(
+            select(IssueDefinitionRow)
+            .where(IssueDefinitionRow.issue_key == body.issue_key)
+            .order_by(IssueDefinitionRow.version.desc())
+            .limit(1)
+        )
+        next_version = 1 if previous is None else previous.version + 1
+        definition = IssueDefinition(
+            issue_key=body.issue_key,
+            version=next_version,
+            title=body.title,
+            description=body.description,
+            category=body.category,
+            applicable_os=frozenset(body.applicable_os),
+            source_id=body.source_id,
+            applicable_software_versions=body.applicable_software_versions,
+            evidence_requirements=evidence_requirements,
+            mitre_mappings=mitre_mappings,
+            cve_references=cve_references,
+            escalation_policy=escalation_policy,
+        )
+    except KnowledgeValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    if previous is not None and previous.active:
+        previous.active = False
+    row = IssueDefinitionRow(
+        issue_key=body.issue_key,
+        version=next_version,
+        title=body.title,
+        description=body.description,
+        category=body.category,
+        applicable_os=body.applicable_os,
+        applicable_software_versions=body.applicable_software_versions,
+        evidence_requirements=[
+            item.model_dump() for item in body.evidence_requirements
+        ],
+        mitre_mappings=[item.model_dump() for item in body.mitre_mappings],
+        cve_references=[item.model_dump() for item in body.cve_references],
+        escalation_policy=(
+            body.escalation_policy.model_dump() if body.escalation_policy else None
+        ),
+        source_id=body.source_id,
+        validated=True,
+        content_hash=definition.content_hash(),
+        active=True,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    session.flush()
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "issue_definition.registered",
+        principal.actor_id,
+        {"issue_key": row.issue_key, "version": row.version, "category": row.category},
+    )
+    result = issue_definition_json(row)
+    session.commit()
+    return result
+
+
+@app.get("/v1/knowledge/issues")
+def list_issue_definitions(
+    active_only: bool = Query(default=True),
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    query = select(IssueDefinitionRow).order_by(
+        IssueDefinitionRow.issue_key, IssueDefinitionRow.version.desc()
+    )
+    if active_only:
+        query = query.where(IssueDefinitionRow.active.is_(True))
+    return [issue_definition_json(row) for row in session.scalars(query).all()]
+
+
+@app.get("/v1/knowledge/issues/{issue_definition_id}")
+def get_issue_definition(
+    issue_definition_id: str,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    row = session.get(IssueDefinitionRow, issue_definition_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "issue definition not found")
+    definition = _issue_definition_from_row(row)
+    if definition.content_hash() != row.content_hash:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"knowledge integrity check failed for {row.issue_key!r}",
+        )
+    result = issue_definition_json(row)
+    workflows = session.scalars(
+        select(DiagnosticWorkflowRow).where(
+            DiagnosticWorkflowRow.issue_definition_id == issue_definition_id
+        )
+    ).all()
+    result["workflows"] = []
+    for workflow in workflows:
+        steps = session.scalars(
+            select(DiagnosticStepRow)
+            .where(DiagnosticStepRow.workflow_id == workflow.id)
+            .order_by(DiagnosticStepRow.step_order)
+        ).all()
+        result["workflows"].append(
+            {
+                "id": workflow.id,
+                "version": workflow.version,
+                "active": workflow.active,
+                "steps": [
+                    {
+                        "id": step.id,
+                        "step_order": step.step_order,
+                        "step_type": step.step_type,
+                        "description": step.description,
+                        "remediation_skill_id": step.remediation_skill_id,
+                        "verification_description": step.verification_description,
+                        "rollback_skill_id": step.rollback_skill_id,
+                        "reference_description": step.reference_description,
+                    }
+                    for step in steps
+                ],
+            }
+        )
+    return result
+
+
+@app.post("/v1/knowledge/issues/{issue_definition_id}/workflows", status_code=201)
+def create_diagnostic_workflow(
+    issue_definition_id: str,
+    body: DiagnosticWorkflowCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Registers a diagnostic workflow for an issue definition. Every
+    ``remediation_skill_id``/``rollback_skill_id`` referenced by any step
+    is checked against the *actual, currently active* skill registry —
+    fails closed (422) if any step references a skill id that isn't
+    really registered, per ``knowledge.py``'s core safety invariant:
+    knowledge may reference an existing trusted skill, never invent one.
+    """
+    issue_row = session.get(IssueDefinitionRow, issue_definition_id)
+    if issue_row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "issue definition not found")
+    known_skill_ids = frozenset(
+        m.skill_id for m in load_active_skill_manifests(session)
+    )
+    try:
+        steps = tuple(
+            DiagnosticStep(
+                step.step_order,
+                step.step_type,
+                step.description,
+                step.remediation_skill_id,
+                step.verification_description,
+                step.rollback_skill_id,
+                step.reference_description,
+            )
+            for step in body.steps
+        )
+        validate_remediation_skill_references(steps, known_skill_ids)
+    except KnowledgeValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    previous = session.scalar(
+        select(DiagnosticWorkflowRow)
+        .where(DiagnosticWorkflowRow.issue_definition_id == issue_definition_id)
+        .order_by(DiagnosticWorkflowRow.version.desc())
+        .limit(1)
+    )
+    next_version = 1 if previous is None else previous.version + 1
+    if previous is not None and previous.active:
+        previous.active = False
+    workflow = DiagnosticWorkflowRow(
+        issue_definition_id=issue_definition_id,
+        version=next_version,
+        active=True,
+        created_by=principal.actor_id,
+    )
+    session.add(workflow)
+    session.flush()
+    for step in body.steps:
+        session.add(
+            DiagnosticStepRow(
+                workflow_id=workflow.id,
+                step_order=step.step_order,
+                step_type=step.step_type,
+                description=step.description,
+                remediation_skill_id=step.remediation_skill_id,
+                verification_description=step.verification_description,
+                rollback_skill_id=step.rollback_skill_id,
+                reference_description=step.reference_description,
+            )
+        )
+    audit(
+        session,
+        principal.tenant_id,
+        workflow.id,
+        "diagnostic_workflow.registered",
+        principal.actor_id,
+        {
+            "issue_definition_id": issue_definition_id,
+            "version": workflow.version,
+            "step_count": len(body.steps),
+        },
+    )
+    session.commit()
+    return {
+        "id": workflow.id,
+        "issue_definition_id": issue_definition_id,
+        "version": workflow.version,
+    }
 
 
 @app.get("/v1/actions")

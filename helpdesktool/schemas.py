@@ -132,6 +132,68 @@ class ConnectorRequestDecision(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class EvidenceRequirementCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=1000)
+    required: bool = True
+
+
+class MitreMappingCreate(BaseModel):
+    technique_id: str = Field(pattern=r"^T\d{4}(\.\d{3})?$")
+    tactic: str = Field(default="", max_length=100)
+    mapping_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    mapping_evidence: str = Field(default="", max_length=1000)
+
+
+class CveReferenceCreate(BaseModel):
+    cve_id: str = Field(pattern=r"^CVE-\d{4}-\d{4,}$")
+    applicable_versions: str = Field(default="", max_length=500)
+
+
+class EscalationPolicyCreate(BaseModel):
+    condition: str = Field(min_length=1, max_length=1000)
+    escalate_to_role: Literal["operator", "admin", "owner", "security_team"] = "admin"
+    priority: Literal["low", "normal", "high", "critical"] = "normal"
+
+
+class KnowledgeSourceCreate(BaseModel):
+    source_organization: str = Field(min_length=1, max_length=200)
+    source_url: str = Field(default="", max_length=2048)
+    retrieval_date: datetime
+    last_verified_date: datetime | None = None
+    source_reliability: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class IssueDefinitionCreate(BaseModel):
+    issue_key: str = Field(min_length=1, max_length=200, pattern=r"^[a-z0-9_.-]+$")
+    title: str = Field(min_length=1, max_length=300)
+    description: str = Field(default="", max_length=10_000)
+    category: str = Field(min_length=1, max_length=50)
+    applicable_os: list[Literal["linux", "windows"]] = Field(min_length=1)
+    applicable_software_versions: dict[str, str] = Field(default_factory=dict)
+    evidence_requirements: list[EvidenceRequirementCreate] = Field(default_factory=list)
+    mitre_mappings: list[MitreMappingCreate] = Field(default_factory=list)
+    cve_references: list[CveReferenceCreate] = Field(default_factory=list)
+    escalation_policy: EscalationPolicyCreate | None = None
+    source_id: str | None = None
+
+
+class DiagnosticStepCreate(BaseModel):
+    step_order: int = Field(ge=0)
+    step_type: Literal[
+        "collect_evidence", "check_precondition", "remediate", "verify", "escalate"
+    ]
+    description: str = Field(default="", max_length=2000)
+    remediation_skill_id: str | None = Field(default=None, max_length=200)
+    verification_description: str = Field(default="", max_length=2000)
+    rollback_skill_id: str | None = Field(default=None, max_length=200)
+    reference_description: str = Field(default="", max_length=2000)
+
+
+class DiagnosticWorkflowCreate(BaseModel):
+    steps: list[DiagnosticStepCreate] = Field(min_length=1, max_length=50)
+
+
 class WebhookSubscriptionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=1, max_length=2048)

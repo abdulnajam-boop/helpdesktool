@@ -2137,6 +2137,84 @@ configurable approval policy, and exportable/auditable compliance evidence.
 
 ---
 
+### Milestone 13 — Phase 1 knowledge schema (DONE, 2026-08-20)
+
+> **Actual completion status: DONE for the schema/validation/API surface;
+> deliberately NOT wired into live diagnosis/remediation planning.**
+> Continues directly from Milestone 12's P1 priority ("the knowledge
+> schema is the correct next P1 now that the safety primitives it needs
+> to plug into safely exist").
+>
+> **What was actually built:**
+> - `helpdesktool/knowledge.py` (new): `IssueDefinition`/
+>   `EvidenceRequirement`/`MitreMapping`/`CveReference`/
+>   `EscalationPolicy`/`DiagnosticStep` dataclasses, mirroring
+>   `skills.py`'s validation/integrity pattern exactly —
+>   `compute_issue_definition_hash` (a SHA-256 over policy-relevant
+>   fields, deliberately excluding free-text `title`/`description`,
+>   re-verified on every read exactly like `SkillManifest.content_hash`).
+>   Structural validation rejects malformed MITRE technique ids (must
+>   match `T####` or `T####.###`), malformed CVE ids (`CVE-YYYY-NNNN+`),
+>   unknown step types, and empty required fields.
+> - **The one safety-critical function**, `validate_remediation_skill_references`:
+>   a `DiagnosticStep`'s `remediation_skill_id` must already be a real,
+>   currently-active registered skill — checked against a live query
+>   against the skill registry at workflow-registration time, not just
+>   structurally. This is the concrete enforcement of "validated
+>   knowledge, never raw text, becomes anything executable": a knowledge
+>   record can reference an existing trusted skill, never invent one.
+> - **A real design inconsistency found and fixed while testing this
+>   against real data:** the first version of this validation also
+>   required `rollback_skill_id` to be an independently registered skill —
+>   but the real `service.restart` manifest has always declared
+>   `rollback_skill_id="service.restore"`, and no `service.restore` skill
+>   has ever been independently registered (the actual rollback mechanism
+>   lives inside `linux_agent/executor.py`'s own `_rollback` method, never
+>   a registry lookup). The new validation was stricter than the
+>   codebase's own existing precedent for what `rollback_skill_id` means.
+>   Fixed: only `remediation_skill_id` is validated against the registry;
+>   `rollback_skill_id` is treated as the same kind of descriptive label
+>   `SkillManifest.rollback_skill_id` already is. Caught by a real
+>   integration test failing against the real skill registry, not by
+>   inspection.
+> - New tables (migration `0012_knowledge_schema`, platform-wide/
+>   unscoped like `skills` — no RLS needed, same pattern as `0008`/`0009`):
+>   `knowledge_sources`, `issue_definitions`, `diagnostic_workflows`,
+>   `diagnostic_steps`.
+> - New API surface: `POST`/`GET /v1/knowledge/sources`, `POST`/`GET
+>   /v1/knowledge/issues`, `GET /v1/knowledge/issues/{id}` (with nested
+>   workflows/steps, integrity-checked on read), `POST
+>   /v1/knowledge/issues/{id}/workflows` (fails closed 422 on any
+>   unregistered `remediation_skill_id`). Owner/admin-gated for writes,
+>   any authenticated user for reads — same pattern as `/v1/skills`.
+> - **Deliberately not wired into `conversation.py`'s live planning
+>   path.** Phase 14 requires newly imported/generated knowledge to
+>   default to simulation-only until explicitly approved; for a schema's
+>   first pass, shipping it as inert, reviewable-only data is the
+>   safest way to honor that — there is no code path anywhere from a
+>   registered `IssueDefinition`/`DiagnosticWorkflow` to an actual
+>   `Action` or chat response yet. Wiring this in is real, separately-
+>   scoped future work, tracked in
+>   `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`.
+>
+> **Tests:** `tests/test_knowledge.py` (18 cases — structural validation,
+> content-hash stability/order-independence/free-text-exclusion, the
+> remediation-skill-reference safety invariant and its rollback-skill
+> exception) and `tests/test_knowledge_api.py` (8 cases — create/list/
+> version-supersession, 422 on malformed MITRE ids, 403 for viewer role,
+> full workflow registration against the real `service.restart` skill,
+> 422-fails-closed on a fake skill reference, 404 on a nonexistent issue,
+> knowledge source lifecycle). 26 new tests total. Verified against real
+> Postgres 17 this pass: a fresh `alembic upgrade head`, then a real
+> `POST /v1/knowledge/issues` → `POST .../workflows` (referencing the
+> real `service.restart` skill) → `GET` (integrity check passes) →
+> attempted-fake-skill-reference (fails closed 422) sequence against the
+> live API, not just the test suite. Full suite green — `ruff`, `ruff
+> format --check`, `mypy --strict`, `pytest` — both locally and in the
+> `python:3.13`/Postgres 17 CI-matching container.
+
+---
+
 ## Open questions to resolve before autonomous execution starts
 
 1. **Target cloud/deployment substrate for Milestone 8** — Kubernetes/Helm vs. a
