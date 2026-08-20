@@ -275,8 +275,12 @@ def handle_message(
             reply = (
                 f"I've submitted a request to {operation.replace('_', ' ')} for "
                 f"{connector_config.display_name} on your account. This needs "
-                f"approval from an admin before it runs. Ticket #{ticket_id[:8]} "
-                "created — I'll let you know here once it's actioned."
+                "approval from an admin before it runs -- and before an admin "
+                "can approve it, you'll need to log into the Helpdesktool "
+                "console yourself and retrieve a step-up verification code "
+                "for this request, then share it with your approver. "
+                f"Ticket #{ticket_id[:8]} created — I'll let you know here "
+                "once it's actioned."
             )
 
     session.add(

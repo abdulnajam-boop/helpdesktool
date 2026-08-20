@@ -1968,6 +1968,10 @@ def connector_request_json(row: ConnectorRequest) -> dict[str, Any]:
         "result_success": row.result_success,
         "result_detail": row.result_detail,
         "verified": row.verified,
+        # Never the hash or the raw code -- just whether one is currently
+        # outstanding, so an operator UI can show "waiting on requester" vs.
+        # "ready for approval".
+        "step_up_code_pending": row.step_up_code_hash is not None,
         "created_at": row.created_at,
     }
 
@@ -2458,6 +2462,83 @@ def list_connector_requests(
     return [connector_request_json(row) for row in rows]
 
 
+_STEP_UP_CODE_TTL_MINUTES = 10
+
+
+def _verify_connector_request_step_up_code(
+    row: ConnectorRequest, supplied: str | None
+) -> None:
+    """Fails closed on every path: no code generated yet, expired, or
+    wrong -- all 403, never a silent pass-through. Consumes the code on
+    success so it can never be replayed against a second decision attempt.
+    """
+    if row.step_up_code_hash is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "requester has not generated a step-up verification code yet",
+        )
+    if row.step_up_code_expires_at is None or _aware(
+        row.step_up_code_expires_at
+    ) < datetime.now(UTC):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "step-up verification code has expired"
+        )
+    if not supplied or not secrets.compare_digest(
+        hashlib.sha256(supplied.encode()).hexdigest(), row.step_up_code_hash
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "incorrect step-up verification code"
+        )
+    row.step_up_code_hash = None
+    row.step_up_code_expires_at = None
+
+
+@app.get("/v1/connector-requests/{request_id}/step-up-code", status_code=201)
+def generate_connector_request_step_up_code(
+    request_id: str,
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Mints a fresh, short-lived step-up verification code for a
+    high-risk connector request -- only the request's own original
+    requester may call this (never an approver, and never anyone else),
+    and only through whatever authenticated session this endpoint is
+    reached with. The point is exactly that: reaching this endpoint at all
+    requires an independently authenticated call, separate from however
+    the original request was created (a Slack/Google Chat message, for
+    instance) -- see migration 0018's docstring for the trust model this
+    closes. Only the SHA-256 hash is stored; the raw code is returned in
+    this one response and nowhere else.
+    """
+    row = tenant_row(session, ConnectorRequest, request_id, principal.tenant_id)
+    if row.requested_by != principal.actor_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only the requester can generate their own step-up code",
+        )
+    if row.risk != "high":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "step-up verification only applies to high-risk requests",
+        )
+    if row.status != "pending_approval":
+        raise HTTPException(status.HTTP_409_CONFLICT, "request is not pending approval")
+    code = f"{secrets.randbelow(900_000_000) + 100_000_000}"
+    expires_at = datetime.now(UTC) + timedelta(minutes=_STEP_UP_CODE_TTL_MINUTES)
+    row.step_up_code_hash = hashlib.sha256(code.encode()).hexdigest()
+    row.step_up_code_expires_at = expires_at
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "connector_request.step_up_code_generated",
+        principal.actor_id,
+        {"expires_at": expires_at.isoformat()},
+    )
+    session.commit()
+    return {"step_up_code": code, "expires_at": expires_at}
+
+
 @app.post("/v1/connector-requests/{request_id}/decision")
 def decide_connector_request(
     request_id: str,
@@ -2472,6 +2553,8 @@ def decide_connector_request(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "requester cannot decide their own request"
         )
+    if body.decision == "approve" and row.risk == "high":
+        _verify_connector_request_step_up_code(row, body.step_up_code)
     row.decided_by = principal.actor_id
     row.decision_reason = body.reason
     row.decided_at = datetime.now(UTC)
