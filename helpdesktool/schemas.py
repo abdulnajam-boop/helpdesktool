@@ -194,6 +194,20 @@ class DiagnosticWorkflowCreate(BaseModel):
     steps: list[DiagnosticStepCreate] = Field(min_length=1, max_length=50)
 
 
+class ChannelWorkspaceLinkCreate(BaseModel):
+    channel: Literal["slack"]
+    workspace_id: str = Field(min_length=1, max_length=200)
+    signing_secret_ref: str = Field(
+        pattern=r"^env:HELPDESK_SLACK_SIGNING_SECRET_[A-Z0-9_]+$", max_length=255
+    )
+
+
+class ChannelIdentityLinkCreate(BaseModel):
+    channel: Literal["slack"]
+    provider_user_id: str = Field(min_length=1, max_length=200)
+    user_id: str
+
+
 class OrganizationalBaselineCreate(BaseModel):
     scope: Literal[
         "generic_best_practice",

@@ -38,7 +38,7 @@ Priority tiers, per the governing mandate:
 | Gap | Priority rationale |
 |---|---|
 | Knowledge schema (`IssueDefinition`/`Detector`/`EvidenceRequirement`/`DiagnosticWorkflow`/`DiagnosticStep`/`VerificationTest`/`EscalationPolicy`/`KnowledgeSource`/`MITREMapping`/`CVEReference`/`OperatingSystemConstraint`/`SoftwareVersionConstraint`/`CommandDefinition`) | The single largest remaining P1 item. Deliberately sequenced *after* this pass's safety primitives (confidence, automation level, security classification, destructive-action blocking) rather than before — a data-driven knowledge/detection system with nowhere safe to plug into would either sit unused or get wired in unsafely under time pressure. Now that the safety primitives exist and are tested, this is the correct next P1. |
-| Slack/Teams/Google Chat channel adapters | The Conversation Service (Milestone 11) is already channel-agnostic; each adapter is additive (signature verification + identity resolution + a call into the existing `handle_message`), not a rearchitecture. Blocked on choosing/vendoring an SDK (`vercel/chat` evaluation per the mandate), not on missing infrastructure. |
+| Slack/Teams/Google Chat channel adapters | **Slack DONE this pass** (`helpdesktool/channels/slack.py`, no SDK dependency — stdlib `hmac` only) — real request-signature verification, replay protection, per-tenant workspace/identity link tables, and a live `POST /v1/channels/slack/events/{link_id}` wired into the existing `handle_message`. Outbound reply-sending is BLOCKED-EXTERNAL (needs a live Slack bot token — see `channels/slack.py`'s `SlackReplySender`/`NullSlackReplySender`). Teams/Google Chat are not started — same additive shape, blocked on SDK choice/vendoring, not infrastructure. |
 | Known-good organizational state (Phase 6) | **CLOSED** — `helpdesktool/baseline.py`'s `BaselineEntry`/`resolve_known_good`, `organizational_baselines` table (migration `0014`, tenant-scoped/RLS-protected), `/v1/baselines` + `/v1/baselines/resolve` API. Precedence: device_baseline > user_baseline > organizational_policy > generic_best_practice; `current_state` is never itself a valid resolution. Verified against real Postgres RLS: tenant A's baseline is invisible to tenant B's `resolve` call. Not yet wired into any live diagnosis/remediation code path — same "ship as inert, reviewable data first" pattern as the Milestone 13 knowledge schema. |
 
 ## P2 — Endpoint reliability
@@ -62,7 +62,7 @@ Priority tiers, per the governing mandate:
 | Gap | Status |
 |---|---|
 | Real (non-mock) application connectors | BLOCKED-EXTERNAL (credentials). |
-| Slack/Teams/Google Chat adapters | Not started (see P1 — architecturally ready, not yet built). |
+| Slack/Teams/Google Chat adapters | Slack done (see P1). Teams/Google Chat not started. |
 | Knowledge ingestion pipeline + provenance tracking (Phase 12) | Not started — depends on the P1 knowledge schema existing first. |
 | MITRE/CVE mapping tables | Not started — same dependency. |
 

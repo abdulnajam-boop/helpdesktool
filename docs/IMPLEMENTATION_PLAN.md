@@ -2404,6 +2404,99 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > for that test's `Settings()` construction; re-run with a clean
 > environment, all 8 `test_config.py` tests pass — not a real regression).
 
+> **Milestone 17 — Phase 18 Slack channel adapter (DONE, 2026-08-20).**
+> The first of the omnichannel adapters the Conversation Service
+> (Milestone 11) was designed to host: real Slack request-signature
+> verification, replay protection, per-tenant workspace/identity mapping,
+> and a live webhook endpoint wired into the existing
+> identity -> conversation -> intent -> policy -> connector/ticket
+> pipeline. No Slack SDK dependency — stdlib `hmac`/`hashlib` only,
+> matching `agent_common`'s dependency-light precedent for trust-boundary
+> code.
+>
+> - `helpdesktool/channels/__init__.py` + `slack.py` (new):
+>   `verify_slack_signature` (Slack's documented v0 HMAC scheme +
+>   5-minute timestamp-skew replay protection, per Slack's own published
+>   recommendation), `resolve_slack_signing_secret` (same
+>   environment-reference-only pattern as `WebhookSubscription.secret_ref`/
+>   `ApplicationConnectorConfig.credential_ref`), `parse_slack_event`
+>   (extracts the envelope the Conversation Service needs, and —
+>   critically — filters out `bot_id`/`bot_message` events, the concrete
+>   Phase-8 loop-prevention guard against a future bot reply re-triggering
+>   itself), `SlackReplySender` Protocol + `NullSlackReplySender`.
+> - Two new tenant-scoped/RLS-protected tables (migration
+>   `0015_channel_links`, revision id pre-verified at 18 chars):
+>   `channel_workspace_links` (maps a Slack `team_id` to exactly one
+>   tenant — globally unique on `(channel, workspace_id)` so no workspace
+>   can be claimed by two tenants) and `channel_identity_links` (maps a
+>   Slack user id to a Helpdesktool `User`, mirroring
+>   `identity_resolution.py`'s trust model: only an already-authenticated
+>   provider id, never message text).
+> - New API: `POST`/`GET /v1/channels/workspace-links`,
+>   `POST`/`GET /v1/channels/identity-links` (owner/admin writes), and the
+>   webhook target `POST /v1/channels/slack/events/{link_id}` — a per-link
+>   URL (not one shared endpoint) is what lets a multi-tenant control
+>   plane resolve which signing secret applies before even parsing the
+>   body, which Slack's `url_verification` handshake requires (its payload
+>   carries no `team_id`).
+>
+> **Two real bugs found and fixed during testing:**
+> 1. The idempotency check used `if idempotency_lookup(...)`, a truthy
+>    check — but this endpoint always stores an empty-dict `{}` response
+>    (it only ever replies 204/no body), and an empty dict is falsy in
+>    Python. A Slack retry of the same `event_id` silently fell through the
+>    dedup guard and crashed on `idempotency_records`' own unique
+>    constraint. Caught by `test_replayed_event_id_is_processed_only_once`.
+>    Fixed by checking `is not None` explicitly.
+> 2. **A fundamental one, only visible against real Postgres RLS, not
+>    SQLite:** the webhook endpoint has no `Principal` dependency (it's an
+>    unauthenticated provider webhook, by design), so no tenant context
+>    GUC was ever set — the RLS-restricted session couldn't see the
+>    `ChannelWorkspaceLink` row *at all* (a legitimate zero-row result
+>    under default-deny RLS), making every real request 404 even with a
+>    correct `link_id` and a valid signature. This is exactly the
+>    chicken-and-egg problem `auth.resolving_identity` already exists to
+>    solve (a lookup that must itself determine which tenant applies), so
+>    the fix reuses it rather than inventing a new bypass: the
+>    `ChannelWorkspaceLink` lookup runs inside `resolving_identity(session)`,
+>    then `set_tenant_context(session, link.tenant_id)` binds the rest of
+>    the request normally. `rls.py`'s module docstring was updated to note
+>    `resolving_identity` now also covers this case (no new bypass site —
+>    still the same five documented `rls_bypass` call sites). This is the
+>    second time this exact session-context class of bug has only
+>    surfaced during the "verify against a real, RLS-enforced Postgres
+>    container" step of this workflow, not the SQLite-backed test suite —
+>    reconfirms why that step stays mandatory for anything touching tenant
+>    isolation.
+>
+> **Tests:** `tests/test_channels_slack.py` (16 unit tests — valid/
+> tampered/wrong-secret/expired/malformed signatures, secret-reference
+> resolution, event parsing incl. bot-message/subtype/non-message/
+> incomplete-event filtering) and `tests/test_channels_slack_api.py` (8
+> integration tests — `url_verification` echo, invalid signature 401,
+> unknown link 404, cross-workspace mismatch 401, unmapped Slack user
+> acknowledged-but-not-processed, a mapped user's message creating a real
+> ticket, replay-safety, and the bot-message loop-prevention proof). 24
+> new tests total, all passing on SQLite. Verified end-to-end against real
+> Postgres 17 with RLS genuinely enforced: `alembic upgrade head`,
+> `\d channel_workspace_links`/`\d channel_identity_links` confirming
+> `FORCE ROW LEVEL SECURITY`, then a real, self-computed Slack-scheme
+> signature sent via `curl` against a live `uvicorn` process — first
+> reproducing bug #2 above as a real 404, then confirming the fix resolves
+> it (204, and the ticket genuinely exists via `GET /v1/tickets`), then
+> confirming replay of the identical `event_id` doesn't create a second
+> ticket. `ruff`/`ruff format --check`/`mypy --strict` clean; full
+> `pytest` suite re-run with only the 4 known pre-existing Windows-only
+> failures, no regressions.
+>
+> **BLOCKED-EXTERNAL:** actually posting a reply into a Slack conversation
+> (`chat.postMessage`) needs a real Slack app installation/bot token this
+> environment doesn't have. `SlackReplySender` is the real, already-
+> correct interface for that call; `NullSlackReplySender` (logs instead of
+> sending) is the only implementation until a real bot token is
+> configured. Not done: Teams/Google Chat adapters (same additive shape,
+> blocked on SDK choice/vendoring per the roadmap, not infrastructure).
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

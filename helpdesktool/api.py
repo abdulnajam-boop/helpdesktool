@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 import uuid
@@ -26,6 +27,13 @@ from .auth import (
     resolving_identity,
 )
 from .baseline import BaselineEntry, BaselineValidationError, resolve_known_good
+from .channels import ChannelSigningError
+from .channels.slack import (
+    NullSlackReplySender,
+    parse_slack_event,
+    resolve_slack_signing_secret,
+    verify_slack_signature,
+)
 from .confidence import ConfidenceInput, compute_confidence
 from .config import get_settings
 from .connectors import ConnectorRegistry
@@ -37,6 +45,8 @@ from .db_models import (
     ApplicationConnectorConfig,
     Approval,
     AuditEventRow,
+    ChannelIdentityLink,
+    ChannelWorkspaceLink,
     ConnectorRequest,
     Conversation,
     ConversationMessage,
@@ -101,6 +111,8 @@ from .reporting import build_report
 from .schemas import (
     ActionCreate,
     ApprovalDecision,
+    ChannelIdentityLinkCreate,
+    ChannelWorkspaceLinkCreate,
     ChatMessageCreate,
     ConnectorConfigCreate,
     ConnectorRequestDecision,
@@ -1986,6 +1998,242 @@ def send_chat_message(
         "ticket_id": result.ticket_id,
         "connector_request_id": result.connector_request_id,
     }
+
+
+def channel_workspace_link_json(row: ChannelWorkspaceLink) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "channel": row.channel,
+        "workspace_id": row.workspace_id,
+        "signing_secret_ref": row.signing_secret_ref,
+        "active": row.active,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+    }
+
+
+@app.post("/v1/channels/workspace-links", status_code=201)
+def create_channel_workspace_link(
+    body: ChannelWorkspaceLinkCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Registers which external chat workspace (e.g. a Slack ``team_id``)
+    belongs to this tenant (Phase 18). The returned ``id`` is the
+    ``link_id`` path segment the provider's webhook Request URL must be
+    configured with -- see ``slack_events`` below for why a per-link URL,
+    not one shared endpoint, is what makes multi-tenant signature
+    verification possible at all.
+    """
+    row = ChannelWorkspaceLink(
+        tenant_id=principal.tenant_id,
+        channel=body.channel,
+        workspace_id=body.workspace_id,
+        signing_secret_ref=body.signing_secret_ref,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "this workspace is already linked to a tenant"
+        ) from exc
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "channel_workspace_link.registered",
+        principal.actor_id,
+        {"channel": row.channel, "workspace_id": row.workspace_id},
+    )
+    result = channel_workspace_link_json(row)
+    session.commit()
+    return result
+
+
+@app.get("/v1/channels/workspace-links")
+def list_channel_workspace_links(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(ChannelWorkspaceLink).where(
+            ChannelWorkspaceLink.tenant_id == principal.tenant_id
+        )
+    ).all()
+    return [channel_workspace_link_json(row) for row in rows]
+
+
+def channel_identity_link_json(row: ChannelIdentityLink) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "channel": row.channel,
+        "provider_user_id": row.provider_user_id,
+        "user_id": row.user_id,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+    }
+
+
+@app.post("/v1/channels/identity-links", status_code=201)
+def create_channel_identity_link(
+    body: ChannelIdentityLinkCreate,
+    principal: Principal = Depends(require_roles("owner", "admin")),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Maps an external chat provider's already-authenticated user id to a
+    Helpdesktool user (Phase 18) -- see
+    ``helpdesktool/identity_resolution.py``'s trust-model docstring: the
+    provider user id must come from the provider's own signed payload,
+    never from message text.
+    """
+    tenant_row(session, User, body.user_id, principal.tenant_id)
+    row = ChannelIdentityLink(
+        tenant_id=principal.tenant_id,
+        channel=body.channel,
+        provider_user_id=body.provider_user_id,
+        user_id=body.user_id,
+        created_by=principal.actor_id,
+    )
+    session.add(row)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this provider identity is already linked for this tenant",
+        ) from exc
+    audit(
+        session,
+        principal.tenant_id,
+        row.id,
+        "channel_identity_link.registered",
+        principal.actor_id,
+        {"channel": row.channel, "provider_user_id": row.provider_user_id},
+    )
+    result = channel_identity_link_json(row)
+    session.commit()
+    return result
+
+
+@app.get("/v1/channels/identity-links")
+def list_channel_identity_links(
+    principal: Principal = Depends(require_user),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(ChannelIdentityLink).where(
+            ChannelIdentityLink.tenant_id == principal.tenant_id
+        )
+    ).all()
+    return [channel_identity_link_json(row) for row in rows]
+
+
+@app.post("/v1/channels/slack/events/{link_id}")
+async def slack_events(
+    link_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Any:
+    """The Slack Events API webhook target. Unauthenticated by design --
+    like any real Slack app's Request URL -- trust comes entirely from
+    Slack's own request signature, verified below against the signing
+    secret the matching ``ChannelWorkspaceLink`` references. The link id
+    in the URL (rather than one shared endpoint for every tenant) is what
+    lets a multi-tenant control plane resolve *which* tenant's signing
+    secret applies before even parsing the body -- required for Slack's
+    ``url_verification`` handshake, whose payload carries no ``team_id``
+    at all. Always acknowledges with 2xx/204 once the request is
+    authentic, per Slack's own retry semantics, even when the event ends
+    up not actionable (unresolved identity, inactive user, non-message
+    event) -- returning an error there would just cause Slack to retry a
+    request that will never become actionable.
+    """
+    # No Principal/tenant context exists yet for this unauthenticated
+    # webhook request -- which tenant this is even depends on the row
+    # we're about to look up. Same narrow, documented exception as
+    # auth.resolving_identity (see rls.py's module docstring): bypass RLS
+    # for exactly this one lookup, then bind the session to the resolved
+    # tenant for everything else in the request, exactly as get_session()
+    # does automatically for an authenticated request.
+    with resolving_identity(session):
+        link = session.get(ChannelWorkspaceLink, link_id)
+    if link is None or not link.active:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown channel link")
+    set_tenant_context(session, link.tenant_id)
+
+    body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    try:
+        signing_secret = resolve_slack_signing_secret(
+            dict(os.environ), link.signing_secret_ref
+        )
+        verify_slack_signature(signing_secret, timestamp, body, signature)
+    except ChannelSigningError as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+    payload = json.loads(body)
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+
+    envelope = parse_slack_event(payload)
+    if envelope is None:
+        return Response(status_code=204)
+    if envelope.team_id != link.workspace_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "workspace mismatch")
+
+    # is not None, not a truthy check: the stored response for a processed
+    # Slack event is deliberately an empty dict (this endpoint always
+    # replies 204/no body), and an empty dict is falsy -- a truthy check
+    # here would silently treat every replay as a brand-new event and then
+    # crash on the idempotency table's own unique constraint.
+    if (
+        idempotency_lookup(
+            session, link.tenant_id, "slack_event", envelope.event_id, payload
+        )
+        is not None
+    ):
+        return Response(status_code=204)
+
+    identity_link = session.scalar(
+        select(ChannelIdentityLink).where(
+            ChannelIdentityLink.tenant_id == link.tenant_id,
+            ChannelIdentityLink.channel == "slack",
+            ChannelIdentityLink.provider_user_id == envelope.user_id,
+        )
+    )
+    user = (
+        session.get(User, identity_link.user_id) if identity_link is not None else None
+    )
+    if user is None or not user.active:
+        audit(
+            session,
+            link.tenant_id,
+            link.id,
+            "channel_message.unresolved_identity",
+            "system:slack_adapter",
+            {"provider_user_id": envelope.user_id, "channel": "slack"},
+        )
+        remember(session, link.tenant_id, "slack_event", envelope.event_id, payload, {})
+        session.commit()
+        return Response(status_code=204)
+
+    result = handle_message(
+        session,
+        link.tenant_id,
+        user,
+        channel="slack",
+        channel_thread_id=envelope.channel_id,
+        message=envelope.text,
+    )
+    remember(session, link.tenant_id, "slack_event", envelope.event_id, payload, {})
+    session.commit()
+    NullSlackReplySender().send(
+        channel_id=envelope.channel_id, thread_ts=envelope.thread_ts, text=result.reply
+    )
+    return Response(status_code=204)
 
 
 @app.get("/v1/conversations")

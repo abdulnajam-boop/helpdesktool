@@ -26,12 +26,15 @@ either of two things is true for the current database session:
      the duration of a whole delivery batch and clears it again when done.
    - ``helpdesktool.auth.resolving_identity``, used only for the single
      lookup that establishes *which* tenant an otherwise-unauthenticated
-     request belongs to (by verified OIDC email, or by device/user
-     credential) — there is no tenant to scope that lookup by yet, that is
-     exactly what it is computing. It is set immediately before that one
-     query and unconditionally cleared immediately after, before any other
-     code runs; the lookup itself grants no access on its own (a credential
-     still has to match).
+     request belongs to (by verified OIDC email, by device/user
+     credential, or — as of the Slack channel adapter — by the
+     ``ChannelWorkspaceLink`` a webhook's URL path segment names) — there
+     is no tenant to scope that lookup by yet, that is exactly what it is
+     computing. It is set immediately before that one query and
+     unconditionally cleared immediately after, before any other code
+     runs; the lookup itself grants no access on its own (a credential
+     still has to match, and for the Slack case the request's signature
+     still has to verify against the resolved link's own signing secret).
    - ``helpdesktool.auth.aggregating_platform_metrics``, used only by
      ``GET /metrics``'s Prometheus exporter to compute platform-wide
      `COUNT(*) ... GROUP BY` aggregates (action/incident status counts,
@@ -103,6 +106,8 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "conversation_messages",
     "connector_requests",
     "organizational_baselines",
+    "channel_workspace_links",
+    "channel_identity_links",
 )
 
 # Tables the application role needs ordinary DML on but that are not
