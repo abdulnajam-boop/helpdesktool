@@ -3192,6 +3192,66 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > around Milestone 12) so a future pass doesn't accidentally trust it.
 > No code changes this milestone.
 
+> **Milestone 31 — container image publishing and keyless signing (DONE,
+> 2026-08-21; live-publish verification pending the resulting `main`
+> run).** Answers the mandate's Priority 7 instruction to evaluate
+> Sigstore/cosign. Auditing the existing `docker` CI job first found the
+> real prerequisite gap: it only ever ran `docker build` locally and
+> discarded the image — nothing was ever pushed anywhere, so there was
+> nothing a real signature could attach to. Because publishing creates
+> real, persistent, publicly-visible artifacts under the repository
+> owner's account (not merely an internal repo change), this was
+> explicitly asked about first rather than assumed safe just because no
+> new credential was technically required — the user chose "publish and
+> sign on every push to main."
+>
+> **What's real:**
+> - The existing `docker` job (never a new one) gained `packages: write`/
+>   `id-token: write` permissions, scoped to that job alone via a
+>   job-level `permissions:` block rather than widening the workflow-wide
+>   grant.
+> - After each image's existing Trivy scan and smoke test (unchanged),
+>   two new steps run **only on a push to `main`** (`if: github.event_name
+>   == 'push' && github.ref == 'refs/heads/main'` — never a PR, so
+>   untrusted PR code can never publish or sign anything under this
+>   project's identity): log in to `ghcr.io` via `docker/login-action`
+>   with the existing `GITHUB_TOKEN` (no new secret), then tag/push the
+>   *same already-validated* local image (never a fresh rebuild that
+>   could subtly differ from what was actually scanned) to
+>   `ghcr.io/<owner>/<repo>-api`/`-frontend`, tagged by commit SHA and
+>   `latest`.
+> - `cosign sign --yes <digest>` signs the pushed image's immutable
+>   digest (not a mutable tag) keylessly — Sigstore's Fulcio/Rekor via
+>   this job's own GitHub Actions OIDC token, so there is no signing key
+>   or extra secret to generate, store, or rotate at all. Immediately
+>   followed by `cosign verify` against that same digest with
+>   `--certificate-identity-regexp`/`--certificate-oidc-issuer` pinned to
+>   this repository and `https://token.actions.githubusercontent.com`,
+>   so the workflow proves the signature actually verifies rather than
+>   trusting `cosign sign`'s exit code alone.
+>
+> **Verification status, stated honestly:** the workflow YAML was
+> validated by actually parsing it with `PyYAML` (not eyeballed), and the
+> milestone branch's own CI run confirmed the `docker` job still passes
+> with the new steps present (they correctly no-op/skip on a
+> non-`main`-branch run, per the `if:` condition — which is itself a real
+> thing to verify, not just assumed from reading the condition). The
+> publish/sign/verify steps have **not yet been observed actually
+> executing** as of the branch commit, since that only happens on `main` —
+> this will be confirmed on the resulting post-merge `main` CI run and
+> recorded as a small follow-up once seen, rather than claimed here in
+> advance. A human should also check GHCR package visibility after that
+> first real publish, since GitHub's own documented default behavior for
+> a `GITHUB_TOKEN`-published package has changed over time and this
+> environment cannot browse the resulting Packages tab to confirm it
+> directly.
+>
+> Not done: signed release archives (as opposed to container images);
+> `cosign attest` (SBOM attestation attached to the signature, as opposed
+> to the CI-artifact SBOM that already exists separately) — real,
+> separate future work, not bundled into this pass to keep the change
+> reviewable in one piece.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

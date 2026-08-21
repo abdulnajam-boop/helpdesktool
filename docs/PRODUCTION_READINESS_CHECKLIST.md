@@ -41,7 +41,7 @@ not "the file exists."
 | Channel identity trust model (never trust chat text for identity) | **DONE** | Slack/Google Chat/Teams all resolve identity only from an already-verified provider payload field, never message text |
 | mTLS (endpoint transport identity) | **NOT STARTED** | Evaluated, deliberately deferred; bearer credential + signed envelopes are the current real defense-in-depth layer |
 | Skill-manifest cryptographic signing | **NOT STARTED** | Integrity-hash only today (tamper-evident on direct DB edit, not independently signed) |
-| Container/release signing (Sigstore/cosign) | **NOT STARTED** | SBOM generation exists in CI; image/release signing does not |
+| Container/release signing (Sigstore/cosign) | **PARTIAL** | Milestone 31 — CI now publishes to GHCR and keylessly signs (Fulcio/Rekor via GitHub's own OIDC token, no new secret) on every `main` push, with an in-job `cosign verify` round-trip. Implemented and CI-green on the merge commit; **not yet independently confirmed on a real `main`-branch push with the publish/sign steps actually executing** (they're skipped on non-`main` runs by design) — a human should also check GHCR package visibility after the first real publish, since GitHub's own default has changed over time |
 | Secret scanning (`gitleaks`, full history) | **DONE** | Green in CI |
 | Dependency CVE scanning (`pip-audit`/`npm audit`) | **DONE** | Zero known CVEs as of `docs/DEPENDENCY_AUDIT.md`'s date; re-run, don't trust the number past that date |
 | Container image scanning (`trivy`) | **DONE** | Fails CI on fixable CRITICAL/HIGH |
@@ -129,7 +129,7 @@ not "the file exists."
 | Terraform / other infrastructure-as-code | **NOT STARTED** | No `.tf` files or `terraform/` directory exist; only `docker compose` deployment exists today |
 | Staging environment | **NOT STARTED** | No staging deployment target has been provisioned |
 | Production secrets management (vault/KMS-backed) | **BLOCKED-EXTERNAL** | `.env`-file configuration is correct for the documented Compose path; a real managed-secrets integration needs a chosen target platform this environment can't provision |
-| Container/release signing | **NOT STARTED** | See P0 |
+| Container/release signing | **PARTIAL** | See P0 |
 
 ## P7 — Operations
 
