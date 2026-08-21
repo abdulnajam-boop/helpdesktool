@@ -192,26 +192,54 @@ def pending_reboot() -> bool:
         return False
 
 
-def process_inventory(limit: int = 25) -> list[dict[str, Any]]:
-    processes: list[dict[str, Any]] = []
-    for proc in psutil.process_iter(["pid", "name", "memory_percent"]):
+def _sampled_processes(sample_seconds: float = 0.1) -> list[dict[str, Any]]:
+    """One CPU+memory sample of every running process. ``Process.
+    cpu_percent()`` needs priming -- its first call always returns a
+    meaningless value (either 0.0 or a since-process-start average,
+    depending on psutil version) -- so every process is primed once,
+    then re-read after ``sample_seconds`` for a real interval-based
+    figure, mirroring ``cpu_inventory``'s own sampling window. Read-only,
+    no shell, no mutation: this exists purely to give the
+    ``high_cpu_usage`` reference issue's ``collect_evidence`` step
+    (``helpdesktool/knowledge.py``, migration ``0013``) the
+    ``top_processes_by_...`` evidence it already describes wanting.
+    """
+    tracked: list[psutil.Process] = []
+    for proc in psutil.process_iter():
         try:
-            info = proc.info
+            proc.cpu_percent(None)
+            tracked.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    time.sleep(sample_seconds)
+    processes: list[dict[str, Any]] = []
+    for proc in tracked:
+        try:
             processes.append(
                 {
-                    "pid": info["pid"],
-                    "name": info["name"],
-                    "memory_percent": round(info.get("memory_percent") or 0.0, 2),
+                    "pid": proc.pid,
+                    "name": proc.name(),
+                    "memory_percent": round(proc.memory_percent() or 0.0, 2),
+                    "cpu_percent": round(proc.cpu_percent(None), 2),
                 }
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+    return processes
+
+
+def process_inventory(limit: int = 25) -> list[dict[str, Any]]:
+    processes = _sampled_processes()
     processes.sort(key=lambda row: row["memory_percent"], reverse=True)
     return processes[:limit]
 
 
 def collect_inventory(monitored_services: tuple[str, ...] = ()) -> dict[str, Any]:
     release, version, _, _ = platform.win32_ver()
+    # One shared CPU+memory process sample feeds both rankings below --
+    # sampling twice would double the (small but real) time this blocks
+    # the heartbeat cycle for no benefit.
+    sampled = _sampled_processes()
     return {
         "hostname": socket.gethostname(),
         "distribution": f"Windows {release}".strip(),
@@ -227,5 +255,10 @@ def collect_inventory(monitored_services: tuple[str, ...] = ()) -> dict[str, Any
         "installed_applications": installed_applications(),
         "pending_reboot": pending_reboot(),
         "process_count": len(psutil.pids()),
-        "top_processes_by_memory": process_inventory(),
+        "top_processes_by_memory": sorted(
+            sampled, key=lambda row: row["memory_percent"], reverse=True
+        )[:25],
+        "top_processes_by_cpu": sorted(
+            sampled, key=lambda row: row["cpu_percent"], reverse=True
+        )[:25],
     }

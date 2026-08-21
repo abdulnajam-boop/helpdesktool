@@ -3094,6 +3094,78 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > the same disclosed-limitation pattern Google Chat used before its own
 > live verification pass. Outbound Teams replies remain BLOCKED-EXTERNAL.
 
+> **Milestone 29 — high-CPU investigation evidence gap closed on both
+> agents (DONE, 2026-08-21).** Continues the mandate's Priority 3
+> instruction to evaluate the remaining reference issues individually
+> rather than batch-adding capability. Of the six issues still ending in
+> `escalate` (disk cleanup, Windows Update repair, SSH auth remediation,
+> unauthorized-software removal, high-CPU mitigation, security-agent
+> repair), disk cleanup/uninstalling software/killing a process are all
+> genuinely destructive-adjacent and correctly deferred pending their own
+> dedicated safety analysis -- attempting any of them in the same pass as
+> everything else would be exactly the "batch add" the mandate says not
+> to do. What *was* safe to build now, with zero new mutation risk: the
+> `high_cpu_usage` issue's own `collect_evidence` step already described
+> wanting `top_processes_by_memory/process inventory` as evidence
+> (migration `0013`), but no collector on either agent actually produced
+> current-CPU-usage-ranked process data -- `linux_agent` had no process
+> inventory at all, and `windows_agent`'s only ranked by memory. This is a
+> real, verifiable gap between stated knowledge and actual capability, not
+> an invented one.
+>
+> **What's real:**
+> - `linux_agent/collectors.py`: new `process_inventory(limit, sample_
+>   seconds)` takes two `/proc/<pid>/stat` readings (`utime`+`stime`,
+>   fields 14/15 per `proc(5)`, read relative to the last `)` so a
+>   `comm` field containing spaces/parens can't misalign the split) across
+>   a short sampling window -- the exact same two-sample-delta technique
+>   `cpu_inventory` already uses for the aggregate figure, applied per
+>   process. A process that exits mid-sample is silently skipped, never
+>   raised. `collect_inventory` gained `process_count` and
+>   `top_processes_by_cpu`.
+> - `windows_agent/collectors.py`: new `_sampled_processes()` takes one
+>   shared CPU+memory sample of every process via psutil's own documented
+>   prime-then-resample pattern (`Process.cpu_percent()`'s first call is
+>   always meaningless); `collect_inventory` now derives both
+>   `top_processes_by_memory` *and* the new `top_processes_by_cpu` from
+>   that single sample rather than sampling twice, which would have
+>   doubled the (small but real) per-heartbeat blocking cost for no
+>   benefit. `process_inventory()` (the pre-existing public function)
+>   keeps its exact prior name/shape, now backed by the shared sampler.
+> - Deliberately **not** built: any mitigation (killing, throttling, or
+>   renicing a process). Investigation and mitigation are genuinely
+>   different risk categories -- the mandate's own phrasing ("high CPU
+>   investigation/mitigation") separates them, and only the read-only half
+>   was safe to build without its own dedicated safety review. The
+>   `high_cpu_usage` knowledge workflow correctly continues to terminate
+>   in `escalate`; this pass gives that escalation genuinely richer
+>   evidence to hand an operator, not a new automatic remediation.
+>
+> **Tests:** `tests/test_windows_collectors.py` is new -- no dedicated
+> Windows collector test file existed before this pass at all. Both new
+> Linux tests (`test_process_inventory_returns_structured_rows_sorted_by_
+> cpu`, `test_process_inventory_skips_processes_that_exit_mid_sample`)
+> were verified for real inside a genuine `python:3.12-slim` Linux
+> container against real `/proc` (all 4 `test_linux_collectors.py` tests
+> green), not just assumed from CI; the Windows collector functions were
+> also called live against this real Windows development host and
+> produced genuine process data (`chrome.exe` at 74.5% CPU, `System Idle
+> Process` correctly showing near-100% idle time, etc.) -- not mocked.
+> `ruff`/`ruff format --check`/`mypy --strict`/`python -m compileall` ran
+> clean both on this Windows host and inside the Linux container; the
+> full `pytest` suite was 100% green inside the Linux container (the
+> known Windows-only failures don't exist on real Linux, by definition)
+> and showed only the now-5 (was 4) documented Windows-only failures on
+> this Windows host, plus the one already-documented flaky
+> Windows-local webhook-redirect test on the real-Postgres run -- no
+> unexplained regressions. `CLAUDE.md`'s documented Windows-only-failure
+> count was updated from 4 to 5 to keep it accurate.
+>
+> Not done, explicitly separate future work: mitigation for any of these
+> six issues, and the other five issues' investigation-only evidence gaps
+> (each would need its own individual evaluation, per this same
+> discipline, not a batch pass).
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
