@@ -3272,6 +3272,26 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > reverting the capability entirely. Flagged to the user directly, since
 > confirming/changing that repository setting is outside what this
 > environment can do unilaterally.
+>
+> **Resolution, same pass:** the very next `main` run (no code or setting
+> change) succeeded — the repo-permissions theory turned out to be wrong,
+> or at least not the actual blocker; the more likely explanation in
+> hindsight is a one-time GHCR propagation delay on creating a brand-new
+> package name, a documented quirk for a first-ever push. Rather than
+> trust the green checkmark alone, this was independently re-verified
+> outside CI entirely: a disposable `cosign v2.4.1` container (not this
+> workflow's own binary) ran `cosign verify` against the real published
+> digest and resolved a genuine Sigstore certificate — `Subject:
+> https://github.com/abdulnajam-boop/helpdesktool/.github/workflows/
+> ci.yml@refs/heads/main`, `Issuer: https://token.actions.
+> githubusercontent.com` — against the real transparency log, and both
+> images were pulled anonymously via GHCR's public OCI API (an anonymous
+> token exchange plus a real manifest fetch) to confirm they're
+> genuinely, publicly published, not just present in the workflow's own
+> local Docker daemon. `continue-on-error: true` was then removed from
+> both steps in a same-pass follow-up commit, since the capability is now
+> confirmed working and a future real failure should go back to blocking
+> `main` rather than being silently tolerated forever.
 
 ---
 

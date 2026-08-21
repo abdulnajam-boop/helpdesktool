@@ -41,7 +41,7 @@ not "the file exists."
 | Channel identity trust model (never trust chat text for identity) | **DONE** | Slack/Google Chat/Teams all resolve identity only from an already-verified provider payload field, never message text |
 | mTLS (endpoint transport identity) | **NOT STARTED** | Evaluated, deliberately deferred; bearer credential + signed envelopes are the current real defense-in-depth layer |
 | Skill-manifest cryptographic signing | **NOT STARTED** | Integrity-hash only today (tamper-evident on direct DB edit, not independently signed) |
-| Container/release signing (Sigstore/cosign) | **PARTIAL, currently failing** | Milestone 31 — CI is wired to publish to GHCR and keylessly sign (Fulcio/Rekor via GitHub's own OIDC token, no new secret) on every `main` push, with an in-job `cosign verify` round-trip. **The first real run on `main` failed at `docker push`** (login and `cosign` install both succeeded) — most likely cause for this personal (non-org) repo: Settings → Actions → General → Workflow permissions defaulting to read-only, which caps what the workflow's own `permissions: packages: write` can grant. **Needs the repository owner to check that setting** (or an authenticated look at the actual failed-step log, which this environment cannot fetch — the GitHub API's job-logs endpoint requires a token this session doesn't have). The publish/sign steps are temporarily `continue-on-error: true` so this doesn't block CI while pending that check — remove once a real push succeeds. |
+| Container/release signing (Sigstore/cosign) | **DONE** | Milestone 31 — CI publishes to GHCR and keylessly signs (Fulcio/Rekor via GitHub's own OIDC token, no new secret) on every `main` push, with an in-job `cosign verify` round-trip. The very first run failed at `docker push`; the next run (no code change) succeeded, and this was confirmed independently — not by trusting CI's own claim: a disposable `cosign v2.4.1` container genuinely verified `ghcr.io/abdulnajam-boop/helpdesktool-api@sha256:aa8a14ce...`'s signature, resolving `Subject: https://github.com/abdulnajam-boop/helpdesktool/.github/workflows/ci.yml@refs/heads/main` / `Issuer: https://token.actions.githubusercontent.com` against the real Sigstore transparency log, and the images were pulled anonymously via GHCR's public OCI API to confirm they're genuinely publicly published. |
 | Secret scanning (`gitleaks`, full history) | **DONE** | Green in CI |
 | Dependency CVE scanning (`pip-audit`/`npm audit`) | **DONE** | Zero known CVEs as of `docs/DEPENDENCY_AUDIT.md`'s date; re-run, don't trust the number past that date |
 | Container image scanning (`trivy`) | **DONE** | Fails CI on fixable CRITICAL/HIGH |
@@ -129,7 +129,7 @@ not "the file exists."
 | Terraform / other infrastructure-as-code | **NOT STARTED** | No `.tf` files or `terraform/` directory exist; only `docker compose` deployment exists today |
 | Staging environment | **NOT STARTED** | No staging deployment target has been provisioned |
 | Production secrets management (vault/KMS-backed) | **BLOCKED-EXTERNAL** | `.env`-file configuration is correct for the documented Compose path; a real managed-secrets integration needs a chosen target platform this environment can't provision |
-| Container/release signing | **PARTIAL** | See P0 |
+| Container/release signing | **DONE** | See P0 |
 
 ## P7 — Operations
 
