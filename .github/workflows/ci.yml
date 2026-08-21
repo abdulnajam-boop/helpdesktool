@@ -99,6 +99,15 @@ jobs:
           retention-days: 90
   docker:
     runs-on: ubuntu-latest
+    # packages: write and id-token: write are only needed for the publish/
+    # sign steps below, which only ever run on a push to main (never a PR,
+    # so untrusted PR code can never publish or sign anything) -- scoped to
+    # this job alone rather than the workflow-wide `permissions:` block at
+    # the top, least-privilege.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - name: Build the API image
@@ -127,6 +136,40 @@ jobs:
           docker logs api-smoke
           docker rm -f api-smoke
           [ -n "$ok" ] || (echo "API container never became healthy" && exit 1)
+      - name: Log in to GHCR
+        # Only ever publishes what already passed the scan and smoke test
+        # above, and only from main -- never a PR, so untrusted PR code
+        # can never publish or sign an image under this project's identity.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cosign
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3
+      - name: Publish and keylessly sign the API image
+        # Keyless signing (Sigstore Fulcio/Rekor via this job's own GitHub
+        # Actions OIDC token, id-token: write above) -- no signing key or
+        # extra secret to generate, store, or rotate. Signs the pushed
+        # image's immutable digest, not a mutable tag, then verifies the
+        # signature round-trips for real rather than trusting `cosign sign`
+        # exited 0.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-api
+        run: |
+          image="${IMAGE,,}"
+          docker tag helpdesktool-api:ci "$image:${{ github.sha }}"
+          docker tag helpdesktool-api:ci "$image:latest"
+          docker push "$image:${{ github.sha }}"
+          docker push "$image:latest"
+          digest=$(docker image inspect --format='{{index .RepoDigests 0}}' "$image:${{ github.sha }}")
+          cosign sign --yes "$digest"
+          cosign verify "$digest" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - name: Build the frontend image
         run: docker build -t helpdesktool-frontend:ci ./frontend
       - name: Scan the frontend image for known vulnerabilities
@@ -147,3 +190,18 @@ jobs:
           docker logs frontend-smoke
           docker rm -f frontend-smoke
           [ -n "$ok" ] || (echo "frontend container never became healthy" && exit 1)
+      - name: Publish and keylessly sign the frontend image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-frontend
+        run: |
+          image="${IMAGE,,}"
+          docker tag helpdesktool-frontend:ci "$image:${{ github.sha }}"
+          docker tag helpdesktool-frontend:ci "$image:latest"
+          docker push "$image:${{ github.sha }}"
+          docker push "$image:latest"
+          digest=$(docker image inspect --format='{{index .RepoDigests 0}}' "$image:${{ github.sha }}")
+          cosign sign --yes "$digest"
+          cosign verify "$digest" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com

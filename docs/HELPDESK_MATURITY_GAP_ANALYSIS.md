@@ -77,7 +77,7 @@ Priority tiers, per the governing mandate:
 | Full UI/UX modernization (Phase 20) | Not started; functional but not yet the target design system. |
 | OpenTelemetry tracing | Evaluated, deliberately deferred (documented in an earlier pass). |
 | Terraform / staging / production deployment | Not started; current deployment story is `docker compose`, independently verified fresh-from-zero in an earlier pass. |
-| SBOM / release signing | **SBOM generation DONE** — CI's `security` job now generates a real CycloneDX SBOM for both the backend (`pip-audit --format=cyclonedx-json`) and frontend (`npm sbom --sbom-format=cyclonedx`) on every push/PR, uploaded as a 90-day build artifact (`sbom-<commit-sha>`) — not a committed file, since an SBOM goes stale the moment dependencies change, same reasoning `docs/DEPENDENCY_AUDIT.md` already gives for its own point-in-time framing. Release signing (Sigstore/cosign for container images, signed release archives) is still not started. |
+| SBOM / release signing | **SBOM generation DONE.** CI's `security` job generates a real CycloneDX SBOM for both the backend (`pip-audit --format=cyclonedx-json`) and frontend (`npm sbom --sbom-format=cyclonedx`) on every push/PR, uploaded as a 90-day build artifact (`sbom-<commit-sha>`) — not a committed file, since an SBOM goes stale the moment dependencies change. **Container image publishing + keyless signing now real (Milestone 31)** — the `docker` job's already-scanned, already-smoke-tested images are pushed to GHCR and `cosign`-signed (Sigstore Fulcio/Rekor via the job's own GitHub Actions OIDC token, no new secret) on every `main` push, with an in-job `cosign verify` round-trip. Signed release archives (as opposed to container images) are still not started. |
 | Dependency/provenance audit (`docs/DEPENDENCY_AUDIT.md` etc.) | **DONE** — `docs/DEPENDENCY_AUDIT.md`, `docs/THIRD_PARTY_LICENSES.md`, `docs/SOFTWARE_PROVENANCE.md`. Zero known CVEs in any declared dependency (`pip-audit`/`npm audit` both clean, matching CI); `psycopg`'s LGPL-3.0 license flagged explicitly (the one non-permissive dependency); no runtime remote-code-execution path found anywhere (checked directly, not assumed). **Real gap surfaced, not fixed:** `pyproject.toml` declares `license = "Apache-2.0"` but no `LICENSE` file exists at the repo root — deliberately not auto-created (needs a real copyright holder name/year, the repo owner's call) — flagged for a human decision, per the mandate's own stop condition for genuine license issues. |
 
 ## What changed in the Milestone 12 pass, in priority order (historical)
@@ -127,7 +127,7 @@ itself from going stale relative to it:
   closing the diagnosis-only half of Phase 14's simulation-mode
   requirement.
 
-## What changed in Milestones 22-29
+## What changed in Milestones 22-31
 
 - (docs) Refreshed this document against Milestones 13-21 (Milestone 22);
   no code changes.
@@ -205,6 +205,17 @@ itself from going stale relative to it:
   the Linux addition was verified for real inside a genuine
   `python:3.12-slim` container against real `/proc`, and the Windows
   addition was verified live on a real Windows host in this same pass.
+- (docs) New `docs/PRODUCTION_READINESS_CHECKLIST.md` (Milestone 30) — a
+  living P0 Security-through-P7 Operations checklist, a genuinely
+  different axis from this document's own P0-P5. No code changes.
+- (P5) **Container image publishing + keyless signing (Milestone 31)** —
+  the `docker` CI job now pushes its already-scanned, already-smoke-tested
+  images to GHCR and `cosign`-signs them (Sigstore Fulcio/Rekor via the
+  job's own GitHub Actions OIDC token, no new secret to generate or
+  store) on every `main` push, with an in-job `cosign verify` round-trip
+  rather than trusting `cosign sign`'s exit code alone. Explicitly asked
+  the user first, since this publishes real, persistent, publicly-visible
+  artifacts under their account — not an internal-only change.
 
 Continuing into the next highest-priority item per the mandate's explicit
 instruction not to stop between phases.
