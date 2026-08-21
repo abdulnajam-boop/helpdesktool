@@ -3166,6 +3166,32 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > (each would need its own individual evaluation, per this same
 > discipline, not a batch pass).
 
+> **Milestone 30 — production readiness checklist (DONE, 2026-08-21).**
+> Answers a new governing mandate's explicit Priority 10 instruction to
+> "create or continuously update a production readiness checklist"
+> against a specific category taxonomy (P0 Security through P7
+> Operations, DONE/PARTIAL/BLOCKED-EXTERNAL/NOT STARTED, never DONE
+> "simply because code exists"). `docs/HELPDESK_MATURITY_GAP_ANALYSIS.md`
+> already tracks priority/what's-next on its own P0-P5 axis, and
+> `docs/RELEASE_READINESS.md` already recorded a point-in-time v0.1.0-rc1
+> release-gate verdict -- neither uses the requested taxonomy or answers
+> "what's left before a real production launch" as its own explicit
+> question, so this is a genuinely new, third document
+> (`docs/PRODUCTION_READINESS_CHECKLIST.md`), not a duplicate: kept as a
+> living document going forward, updated in place rather than replaced
+> per pass, the same way the maturity analysis already is.
+>
+> Every row was cross-checked against this session's own actual
+> verification work (real Postgres runs, the real Linux container run,
+> live Windows hardware, real CI polling) rather than copied from an
+> older document's claims. `CLAUDE.md`'s docs-pointer paragraph was
+> updated to explain how all four planning/audit documents
+> (`IMPLEMENTATION_PLAN.md`, `HELPDESK_MATURITY_GAP_ANALYSIS.md`,
+> `PRODUCTION_READINESS_CHECKLIST.md`, `RELEASE_READINESS.md`) relate,
+> and to flag that `docs/CURRENT_ARCHITECTURE_AUDIT.md` is stale (frozen
+> around Milestone 12) so a future pass doesn't accidentally trust it.
+> No code changes this milestone.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts
