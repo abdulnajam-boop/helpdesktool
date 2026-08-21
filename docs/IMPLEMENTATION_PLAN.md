@@ -3002,6 +3002,98 @@ configurable approval policy, and exportable/auditable compliance evidence.
 > compromise recovery, not a "burn everything down" scenario, which is a
 > deliberately heavier, separate action.
 
+> **Milestone 28 — Microsoft Teams channel adapter, the third and final
+> planned omnichannel channel (DONE, 2026-08-21).** A fresh repository
+> audit (re-verified against real code and a real test run, not assumed
+> from docs) confirmed Slack and Google Chat were done and Teams was the
+> one remaining gap named explicitly in both the maturity analysis and the
+> new governing mandate's Priority 1. Google Chat's own module docstring
+> had already flagged *why* Teams was deferred: the Bot Framework inbound
+> JWT authenticates the Connector Service itself, not a human, so its
+> exact claim set (specifically whether a `sub` claim is guaranteed) was
+> less certain than Google's standard OIDC ID token -- reusing
+> `OIDCVerifier` as-is risked either fabricating a requirement that
+> doesn't hold (a real availability bug) or silently trusting an assumed
+> shape. This pass resolved that by not reusing `OIDCVerifier` at all.
+>
+> **What's real:**
+> - `helpdesktool/channels/teams.py`: `verify_teams_bot_framework_token`
+>   is a small, dedicated `pyjwt`/`PyJWKClient`-based verifier checking
+>   only what is genuinely well-documented and stable about Bot
+>   Framework's protocol: RS256 signature, issuer
+>   (`https://api.botframework.com`), audience (this bot's single
+>   platform-wide Microsoft App ID), expiry, and the documented Bot
+>   Framework SDK protection of a conditional `serviceurl` claim match
+>   (enforced only when the claim is present, since its universal
+>   presence isn't something this pass could verify against a live
+>   registration). Deliberately does **not** require a `sub` claim.
+> - `parse_teams_activity` extracts `message`-type Activities
+>   (`conversationUpdate`/other types are correctly ignored, carrying no
+>   text). No loop-prevention filter is needed, unlike Slack: Bot
+>   Framework never redelivers a bot's own sent replies to the same
+>   messaging endpoint -- replies go out-of-band to the Connector REST API
+>   against the Activity's own `serviceUrl`.
+> - The real Teams end-user identity is never the JWT's own claims (which
+>   authenticate the *connector*, not the user) -- it's the
+>   already-verified Activity body's `from.aadObjectId` (falling back to
+>   `from.id`), exactly the same identity-in-a-verified-payload pattern
+>   `slack.py`'s `event.user`/`google_chat.py`'s `message.sender.name` use.
+> - A genuine multi-tenancy design difference from Google Chat, reasoned
+>   through explicitly rather than copied: one Bot Framework App
+>   registration serves *every* customer's Microsoft 365 tenant (unlike
+>   Google Chat's per-customer Cloud project), so the bot's App ID
+>   (`Settings.teams_bot_app_id`, new setting) is a single platform-wide
+>   JWT-audience constant, while `ChannelWorkspaceLink.workspace_id` for
+>   `channel="teams"` stores the Microsoft 365/Azure AD tenant id
+>   (`channelData.tenant.id`) -- the actual per-customer discriminator
+>   that resolves which Helpdesktool tenant an inbound Activity belongs
+>   to. `POST /v1/channels/teams/events/{link_id}` fails closed (503) if
+>   `teams_bot_app_id` isn't configured, rather than silently accepting
+>   unverifiable requests.
+> - `NullTeamsReplySender` mirrors `NullSlackReplySender` exactly --
+>   BLOCKED-EXTERNAL (a real reply needs an OAuth2 token from a real Azure
+>   AD client secret this environment doesn't have), logs instead of
+>   silently discarding.
+> - No new migration: `ChannelWorkspaceLink`/`ChannelIdentityLink`'s
+>   `channel` column was already a plain string (proven true twice now,
+>   for Google Chat and Teams both). `schemas.py`'s
+>   `ChannelWorkspaceLinkCreate`/`ChannelIdentityLinkCreate` widened to
+>   `Literal["slack", "google_chat", "teams"]`; `signing_secret_ref`'s
+>   channel-conditional validation extended to treat `teams` the same as
+>   `google_chat` (JWKS-verified, no shared secret, must be empty).
+>
+> **Tests:** `tests/test_channels_teams.py` (15 cases: valid-token
+> acceptance with and without a `serviceurl` claim present, missing/empty
+> bearer header, wrong audience, wrong issuer, wrong signing key,
+> mismatched `serviceUrl`, a trailing-slash-only `serviceUrl` difference
+> still accepted, Activity parsing including the `aadObjectId`→`from.id`
+> fallback, non-message/incomplete/missing-tenant Activities all correctly
+> ignored, and the null reply sender). `tests/test_channels_teams_api.py`
+> (8 cases, integration: unconfigured bot App ID fails closed with 503,
+> invalid token rejected, unknown link 404, cross-tenant Activity
+> rejected, non-message Activity acknowledged without processing,
+> unmapped-user acknowledgement with no ticket, mapped-user ticket
+> creation, replay idempotency). `ruff`/`ruff format --check`/
+> `mypy --strict`/`python -m compileall` clean; full `pytest` suite
+> re-run against both SQLite and a real disposable Postgres container
+> (`alembic upgrade head` confirmed no schema change was needed) with only
+> the same 4 known pre-existing Windows-only failures (plus, on the
+> Postgres-tier run, the one documented Windows-local socket flake in
+> `test_integrations.py` — not a regression) — no new failures.
+>
+> **Documentation**: `README.md` was independently found stale during
+> this pass's fresh repository audit (still described key rotation and
+> mTLS as unimplemented, didn't mention Google Chat/step-up
+> verification/`dns.flush_cache`/Teams) and was refreshed as part of this
+> milestone, not deferred — a real, separate finding, not scope creep.
+>
+> Not done, correctly named as BLOCKED-EXTERNAL rather than invented: this
+> has not been exercised against a real Azure Bot Service/Teams app
+> registration (no Azure AD app exists in this environment) -- only
+> against a locally generated RSA keypair standing in for the real JWKS,
+> the same disclosed-limitation pattern Google Chat used before its own
+> live verification pass. Outbound Teams replies remain BLOCKED-EXTERNAL.
+
 ---
 
 ## Open questions to resolve before autonomous execution starts

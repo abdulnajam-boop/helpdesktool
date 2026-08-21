@@ -205,14 +205,21 @@ _SLACK_SIGNING_SECRET_REF_PATTERN = re.compile(
 
 
 class ChannelWorkspaceLinkCreate(BaseModel):
-    channel: Literal["slack", "google_chat"]
+    channel: Literal["slack", "google_chat", "teams"]
+    # For "teams", this is the Microsoft 365/Azure AD tenant id
+    # (channelData.tenant.id) that resolves which Helpdesktool tenant an
+    # inbound Bot Framework Activity belongs to -- not the bot's App ID,
+    # which is a single platform-wide constant (Settings.teams_bot_app_id)
+    # shared across every customer, unlike Google Chat's per-customer
+    # Cloud project number. See helpdesktool/channels/teams.py.
     workspace_id: str = Field(min_length=1, max_length=200)
     # Slack authenticates with a per-workspace shared HMAC secret, so
-    # signing_secret_ref is required and shape-checked. Google Chat
-    # authenticates with a Google-signed Bearer JWT verified against a
-    # fixed, provider-published JWKS (helpdesktool.channels.google_chat) --
-    # there is no shared secret to store, so this field must stay empty
-    # rather than accepting one that would never actually be used.
+    # signing_secret_ref is required and shape-checked. Google Chat and
+    # Teams both authenticate with a provider-signed Bearer JWT verified
+    # against a fixed, provider-published JWKS (helpdesktool.channels.
+    # google_chat / .teams) -- there is no shared secret to store for
+    # either, so this field must stay empty rather than accepting one
+    # that would never actually be used.
     signing_secret_ref: str = Field(default="", max_length=255)
 
     @model_validator(mode="after")
@@ -225,15 +232,16 @@ class ChannelWorkspaceLinkCreate(BaseModel):
                     "slack requires signing_secret_ref matching "
                     "env:HELPDESK_SLACK_SIGNING_SECRET_*"
                 )
-        elif self.channel == "google_chat" and self.signing_secret_ref:
+        elif self.channel in {"google_chat", "teams"} and self.signing_secret_ref:
             raise ValueError(
-                "google_chat uses JWT/JWKS verification; signing_secret_ref must be empty"
+                f"{self.channel} uses JWT/JWKS verification; "
+                "signing_secret_ref must be empty"
             )
         return self
 
 
 class ChannelIdentityLinkCreate(BaseModel):
-    channel: Literal["slack", "google_chat"]
+    channel: Literal["slack", "google_chat", "teams"]
     provider_user_id: str = Field(min_length=1, max_length=200)
     user_id: str
 

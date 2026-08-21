@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
+    # This bot's single, platform-wide Microsoft App ID (Bot Framework's
+    # required JWT audience for every inbound Teams request, regardless of
+    # which customer Microsoft 365 tenant sent it -- see
+    # helpdesktool/channels/teams.py's module docstring). Empty means the
+    # Teams channel is not configured; the endpoint fails closed (503)
+    # rather than silently accepting unverifiable requests.
+    teams_bot_app_id: str = ""
     lease_reaper_max_attempts: int = 3
     lease_reaper_poll_seconds: float = 15.0
     # Phase 8/P2: a pending_approval ConnectorRequest has no agent claim/

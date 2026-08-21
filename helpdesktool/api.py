@@ -41,6 +41,11 @@ from .channels.slack import (
     resolve_slack_signing_secret,
     verify_slack_signature,
 )
+from .channels.teams import (
+    NullTeamsReplySender,
+    parse_teams_activity,
+    verify_teams_bot_framework_token,
+)
 from .confidence import ConfidenceInput, compute_confidence
 from .config import get_settings
 from .connectors import ConnectorRegistry
@@ -2353,6 +2358,113 @@ async def google_chat_events(
     )
     session.commit()
     return reply_body
+
+
+@app.post("/v1/channels/teams/events/{link_id}")
+async def teams_events(
+    link_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> Any:
+    """The Bot Framework messaging endpoint target for Microsoft Teams.
+    Unauthenticated by design, like ``slack_events``/``google_chat_events``
+    above -- trust comes entirely from the Bot Framework Connector
+    Service's own signed Bearer token, verified against this bot's single
+    platform-wide App ID (``Settings.teams_bot_app_id``), never a
+    per-workspace secret. The link id in the URL resolves which
+    Helpdesktool tenant's ``workspace_id`` (a Microsoft 365/Azure AD
+    tenant id) the inbound Activity must match -- see
+    ``channels/teams.py``'s module docstring for the full trust model,
+    including why the bot App ID and the multi-tenant discriminator are
+    two different values here, unlike Google Chat.
+    """
+    with resolving_identity(session):
+        link = session.get(ChannelWorkspaceLink, link_id)
+    if link is None or not link.active or link.channel != "teams":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown channel link")
+    set_tenant_context(session, link.tenant_id)
+
+    body = await request.body()
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "malformed request body"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "malformed request body")
+
+    settings = get_settings()
+    if not settings.teams_bot_app_id:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Teams channel is not configured"
+        )
+    activity_service_url = payload.get("serviceUrl")
+    try:
+        verify_teams_bot_framework_token(
+            request.headers.get("Authorization", ""),
+            app_id=settings.teams_bot_app_id,
+            activity_service_url=(
+                activity_service_url if isinstance(activity_service_url, str) else None
+            ),
+        )
+    except ChannelSigningError as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+    envelope = parse_teams_activity(payload)
+    if envelope is None:
+        return Response(status_code=204)
+    if envelope.tenant_id != link.workspace_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "workspace mismatch")
+
+    cached = idempotency_lookup(
+        session, link.tenant_id, "teams_event", envelope.activity_id, payload
+    )
+    if cached is not None:
+        return Response(status_code=204)
+
+    identity_link = session.scalar(
+        select(ChannelIdentityLink).where(
+            ChannelIdentityLink.tenant_id == link.tenant_id,
+            ChannelIdentityLink.channel == "teams",
+            ChannelIdentityLink.provider_user_id == envelope.user_id,
+        )
+    )
+    user = (
+        session.get(User, identity_link.user_id) if identity_link is not None else None
+    )
+    if user is None or not user.active:
+        audit(
+            session,
+            link.tenant_id,
+            link.id,
+            "channel_message.unresolved_identity",
+            "system:teams_adapter",
+            {"provider_user_id": envelope.user_id, "channel": "teams"},
+        )
+        remember(
+            session, link.tenant_id, "teams_event", envelope.activity_id, payload, {}
+        )
+        session.commit()
+        return Response(status_code=204)
+
+    result = handle_message(
+        session,
+        link.tenant_id,
+        user,
+        channel="teams",
+        channel_thread_id=envelope.conversation_id,
+        message=envelope.text,
+    )
+    remember(session, link.tenant_id, "teams_event", envelope.activity_id, payload, {})
+    session.commit()
+    NullTeamsReplySender().send(
+        service_url=envelope.service_url,
+        conversation_id=envelope.conversation_id,
+        activity_id=envelope.activity_id,
+        text=result.reply,
+    )
+    return Response(status_code=204)
 
 
 @app.get("/v1/conversations")

@@ -41,7 +41,7 @@ Priority tiers, per the governing mandate:
 | Knowledge schema (`IssueDefinition`/`EvidenceRequirement`/`DiagnosticWorkflow`/`DiagnosticStep`/`EscalationPolicy`/`KnowledgeSource`/`MitreMapping`/`CveReference`) | **CLOSED** — `helpdesktool/knowledge.py` (Milestone 13), populated with 10 curated reference issues (Milestone 14). Not modeled as separate schema types (folded into the shapes above instead, which cover the same ground more simply): `Detector`/`VerificationTest`/`OperatingSystemConstraint`/`SoftwareVersionConstraint`/`CommandDefinition` — a `DiagnosticStep`'s `step_type`/`verification_description`/`applicable_os` on `IssueDefinition` already cover what those would have. |
 | Action-preview / dry-run execution surface (Phase 14, beyond diagnosis) | **CLOSED** — see P3 below (`action_preview.py`). |
 | Idempotency/loop prevention for the connector-request pipeline (Phase 8) | **CLOSED** — see P2 below (`connector_request_reaper.py`). |
-| Slack/Teams/Google Chat channel adapters | **Slack and Google Chat DONE.** `helpdesktool/channels/slack.py` (Milestone 17) — real request-signature verification, replay protection, per-tenant workspace/identity link tables, `POST /v1/channels/slack/events/{link_id}` wired into `handle_message`; outbound reply is BLOCKED-EXTERNAL (needs a live Slack bot token). `helpdesktool/channels/google_chat.py` (Milestone 25) — real Bearer-ID-token verification reusing `oidc.py`'s `OIDCVerifier` unchanged, `POST /v1/channels/google-chat/events/{link_id}`, and a **synchronous reply that is not BLOCKED-EXTERNAL** (Google Chat's HTTP contract lets an app reply in the same response — the first channel adapter to close the full loop with no external credential dependency). Teams is the one remaining adapter — same additive shape (`ChannelWorkspaceLink`/`ChannelIdentityLink` already generically support a third `channel` value with no new migration needed), not started because the Bot Framework inbound JWT's exact claim shape needs validating against a live registration before it can be built with the same confidence as Google Chat's well-documented contract. |
+| Slack/Teams/Google Chat channel adapters | **ALL THREE DONE.** `helpdesktool/channels/slack.py` (Milestone 17) — real request-signature verification, replay protection, per-tenant workspace/identity link tables, `POST /v1/channels/slack/events/{link_id}` wired into `handle_message`; outbound reply is BLOCKED-EXTERNAL (needs a live Slack bot token). `helpdesktool/channels/google_chat.py` (Milestone 25) — real Bearer-ID-token verification reusing `oidc.py`'s `OIDCVerifier` unchanged, `POST /v1/channels/google-chat/events/{link_id}`, and a **synchronous reply that is not BLOCKED-EXTERNAL** (Google Chat's HTTP contract lets an app reply in the same response). `helpdesktool/channels/teams.py` (Milestone 28) — real Bot Framework JWT verification via a dedicated `pyjwt`/`PyJWKClient` verifier (not `OIDCVerifier` reuse, since a Bot Framework connector-service token's claim set is less certain than a human OIDC login token's — deliberately doesn't require a `sub` claim it can't be sure exists), issuer/audience/JWKS checks plus the documented conditional `serviceUrl` claim match, `POST /v1/channels/teams/events/{link_id}`; outbound reply is BLOCKED-EXTERNAL (needs a real Azure AD client secret). All three verified only against a locally generated keypair standing in for each provider's real JWKS — none has been exercised against a live registration. `ChannelWorkspaceLink`/`ChannelIdentityLink` needed no new migration for any of the three — the `channel` column was always a plain string. |
 | Known-good organizational state (Phase 6) | **CLOSED** — `helpdesktool/baseline.py`'s `BaselineEntry`/`resolve_known_good`, `organizational_baselines` table (migration `0014`, tenant-scoped/RLS-protected), `/v1/baselines` + `/v1/baselines/resolve` API. Precedence: device_baseline > user_baseline > organizational_policy > generic_best_practice; `current_state` is never itself a valid resolution. Verified against real Postgres RLS: tenant A's baseline is invisible to tenant B's `resolve` call. Not yet wired into any live diagnosis/remediation code path — same "ship as inert, reviewable data first" pattern as the Milestone 13 knowledge schema. |
 
 ## P2 — Endpoint reliability
@@ -66,7 +66,7 @@ Priority tiers, per the governing mandate:
 | Gap | Status |
 |---|---|
 | Real (non-mock) application connectors | BLOCKED-EXTERNAL (credentials). |
-| Slack/Teams/Google Chat adapters | Slack and Google Chat done (see P1). Teams not started. |
+| Slack/Teams/Google Chat adapters | All three done (see P1). |
 | Knowledge provenance tracking (Phase 12) | **Schema/tracking DONE, automated ingestion NOT.** `KnowledgeSourceRow` (source_organization/source_url/retrieval_date/last_verified_date/source_reliability/deprecated/superseded_by, Milestone 13) exists and is populated (Milestone 14's 10 reference issues are honestly attributed to a single internal `KnowledgeSource`, not a fabricated external citation). What's still genuinely missing: an automated pipeline that fetches/parses real external knowledge sources (a CVE feed, a vendor KB) and proposes new `IssueDefinition` records for human review — today every knowledge record is hand-authored. |
 | MITRE/CVE mapping tables | **DONE** — `MitreMapping`/`CveReference` in `helpdesktool/knowledge.py` (Milestone 13), both structurally validated (technique-id/CVE-id regex) and exercised by real reference content (Milestone 14). |
 
@@ -127,7 +127,7 @@ itself from going stale relative to it:
   closing the diagnosis-only half of Phase 14's simulation-mode
   requirement.
 
-## What changed in Milestones 22-27
+## What changed in Milestones 22-28
 
 - (docs) Refreshed this document against Milestones 13-21 (Milestone 22);
   no code changes.
@@ -182,6 +182,19 @@ itself from going stale relative to it:
   end-to-end, not just reasoned about: a real API test rotates the
   version mid-test and proves both the old and new envelopes still
   verify.
+- (P1) **Third and final planned omnichannel adapter: Microsoft Teams
+  (Milestone 28)**, via the Bot Framework Connector Service. A dedicated
+  verifier (not `OIDCVerifier` reuse) checks signature/issuer/audience/
+  expiry plus the documented conditional `serviceUrl` claim match,
+  deliberately not requiring a `sub` claim the connector-service token
+  type isn't certain to carry. Same never-trust-message-text identity
+  model as Slack/Google Chat: the real Teams user comes from the
+  already-verified Activity's `from.aadObjectId`. No new migration --
+  `ChannelWorkspaceLink.workspace_id` stores the Microsoft 365/Azure AD
+  tenant id (the multi-tenant discriminator) while the bot's single
+  platform-wide App ID lives in `Settings.teams_bot_app_id` (the JWT
+  audience, fixed regardless of which customer tenant is calling).
+  Outbound reply is BLOCKED-EXTERNAL, same as Slack.
 
 Continuing into the next highest-priority item per the mandate's explicit
 instruction not to stop between phases.
